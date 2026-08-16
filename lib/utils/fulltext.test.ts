@@ -36,6 +36,16 @@ beforeEach(() => {
 });
 
 describe('fetchFulltext', () => {
+    it('uses the Impress Watch main content instead of a sidebar', async () => {
+        const link = 'https://av.watch.impress.co.jp/docs/news/2132788.html';
+        pageHtml.set(link, '<aside class="latest"><div class="body">Sidebar content</div></aside><article role="main"><div class="main-contents"><p>Actual article content from Impress Watch.</p></div></article>');
+
+        const result = await fetchFulltext({ title: 'Article', link, description: 'Summary' });
+
+        expect(result.description).toContain('Actual article content from Impress Watch.');
+        expect(result.description).not.toContain('Sidebar content');
+    });
+
     it('combines same-origin article pages', async () => {
         const firstPage = 'https://example.com/article/1';
         const secondPage = 'https://example.com/article/2';

@@ -33,6 +33,27 @@ const getNextPageUrl = ($: CheerioAPI, pageUrl: string) => {
     }
 };
 
+const getImpressWatchContent = ($: CheerioAPI, pageUrl: string) => {
+    let hostname: string;
+    try {
+        hostname = new URL(pageUrl).hostname;
+    } catch {
+        return;
+    }
+
+    if (!hostname.endsWith('.watch.impress.co.jp') && hostname !== 'watch.impress.co.jp') {
+        return;
+    }
+
+    const content = $('article[role="main"] .main-contents').first();
+    if (!content.length) {
+        return;
+    }
+
+    content.find('script, style, .affiliate_tag_multi, .article-pager, .pagination, .related, .recommend, .social-bookmark').remove();
+    return content.html() ?? undefined;
+};
+
 const fetchParsedPage = (pageUrl: string): Promise<ParsedPage> =>
     cache.tryGet(`mercury-cache-page-${pageUrl}`, async () => {
         try {
@@ -43,8 +64,8 @@ const fetchParsedPage = (pageUrl: string): Promise<ParsedPage> =>
 
             return {
                 author: result.author,
-                content: result.content,
-                nextUrl: getNextPageUrl($, pageUrl),
+                content: getImpressWatchContent($, pageUrl) ?? result.content,
+                nextUrl: result.next_page_url ?? getNextPageUrl($, pageUrl),
             };
         } catch {
             return {};
