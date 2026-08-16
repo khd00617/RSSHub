@@ -55,7 +55,7 @@ const getImpressWatchContent = ($: CheerioAPI, pageUrl: string) => {
 };
 
 const fetchParsedPage = (pageUrl: string): Promise<ParsedPage> =>
-    cache.tryGet(`mercury-cache-page-${pageUrl}`, async () => {
+    cache.tryGet(`mercury-cache-page-v2-${pageUrl}`, async () => {
         try {
             const { default: Parser } = await import('@jocmp/mercury-parser');
             const response = await ofetch(pageUrl);
@@ -127,7 +127,7 @@ const fetchAllPages = async (link: string) => {
 
 export async function fetchFulltext(item: DataItem): Promise<DataItem> {
     const { link, author, description } = item;
-    const parsedResult = await cache.tryGet<ParsedPage>(`mercury-cache-fulltext-${link}`, () => {
+    const parsedResult = await cache.tryGet<ParsedPage>(`mercury-cache-fulltext-v2-${link}`, () => {
         if (!link) {
             return Promise.resolve({});
         }
