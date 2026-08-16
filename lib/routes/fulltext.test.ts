@@ -4,7 +4,7 @@ import type { Data } from '@/types';
 import { fetchFulltext } from '@/utils/fulltext';
 import parser from '@/utils/rss-parser';
 
-import { route } from './index';
+import { route } from './fulltext/index';
 
 vi.mock('@/utils/rss-parser', () => ({
     default: {
