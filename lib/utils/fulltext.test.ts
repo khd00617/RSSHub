@@ -1,0 +1,74 @@
+import parser from '@jocmp/mercury-parser';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import ofetch from '@/utils/ofetch';
+
+import { fetchFulltext } from './fulltext';
+
+vi.mock('@jocmp/mercury-parser', () => ({
+    default: {
+        parse: vi.fn(),
+    },
+}));
+
+vi.mock('@/utils/cache', () => ({
+    default: {
+        tryGet: vi.fn((_key: string, getValue: () => Promise<unknown>) => getValue()),
+    },
+}));
+
+vi.mock('@/utils/ofetch', () => ({
+    default: vi.fn(),
+}));
+
+const pageHtml = new Map<string, string>();
+
+beforeEach(() => {
+    vi.clearAllMocks();
+    pageHtml.clear();
+    vi.mocked(ofetch).mockImplementation((url) => Promise.resolve(pageHtml.get(String(url)) ?? '<html></html>'));
+    vi.mocked(parser.parse).mockImplementation((url) =>
+        Promise.resolve({
+            author: 'Author',
+            content: `Content from ${url} with enough text to be treated as extracted article content.`,
+        } as any)
+    );
+});
+
+describe('fetchFulltext', () => {
+    it('combines same-origin article pages', async () => {
+        const firstPage = 'https://example.com/article/1';
+        const secondPage = 'https://example.com/article/2';
+        pageHtml.set(firstPage, `<a rel="next" href="${secondPage}">Next</a>`);
+        pageHtml.set(secondPage, '<p>Second page</p>');
+
+        const result = await fetchFulltext({ title: 'Article', link: firstPage, description: 'Summary' });
+
+        expect(result.author).toBe('Author');
+        expect(result.description).toBe(`Content from ${firstPage} with enough text to be treated as extracted article content.<hr>Content from ${secondPage} with enough text to be treated as extracted article content.`);
+        expect(ofetch).toHaveBeenCalledTimes(2);
+        expect(parser.parse).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops when a next-page link leaves the article origin', async () => {
+        const firstPage = 'https://example.com/article/1';
+        pageHtml.set(firstPage, '<a class="next" href="https://other.example.com/article/2">Next</a>');
+
+        await fetchFulltext({ title: 'Article', link: firstPage, description: 'Summary' });
+
+        expect(ofetch).toHaveBeenCalledTimes(1);
+        expect(parser.parse).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops on a cyclic next-page link', async () => {
+        const firstPage = 'https://example.com/article/1';
+        const secondPage = 'https://example.com/article/2';
+        pageHtml.set(firstPage, `<a aria-label="次のページ" href="${secondPage}">次のページ</a>`);
+        pageHtml.set(secondPage, `<a rel="next" href="${firstPage}">Next</a>`);
+
+        await fetchFulltext({ title: 'Article', link: firstPage, description: 'Summary' });
+
+        expect(ofetch).toHaveBeenCalledTimes(2);
+        expect(parser.parse).toHaveBeenCalledTimes(2);
+    });
+});

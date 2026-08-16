@@ -12,6 +12,7 @@ import { simplecc } from 'simplecc-wasm';
 import { config } from '@/config';
 import type { Data, DataItem } from '@/types';
 import cache from '@/utils/cache';
+import { fetchFulltext } from '@/utils/fulltext';
 import ofetch from '@/utils/ofetch';
 
 const md = markdownit({
@@ -302,29 +303,7 @@ const middleware: MiddlewareHandler = async (ctx, next) => {
 
         // fulltext
         if (ctx.req.query('mode')?.toLowerCase() === 'fulltext') {
-            const tasks = data.item.map(async (item) => {
-                const { link, author, description } = item;
-                const parsed_result: any = await cache.tryGet(`mercury-cache-${link}`, async () => {
-                    if (link) {
-                        // if parser failed, return default description and not report error
-                        try {
-                            const { default: Parser } = await import('@jocmp/mercury-parser');
-                            const res = await ofetch(link);
-                            const $ = load(res);
-                            const result = await Parser.parse(link, {
-                                html: $.html(),
-                            });
-                            return result;
-                        } catch {
-                            // no-empty
-                        }
-                    }
-                });
-
-                item.author = author || parsed_result?.author;
-                item.description = parsed_result && parsed_result.content.length > 40 ? entities.decodeXML(parsed_result.content) : description;
-            });
-            await Promise.all(tasks);
+            data.item = await Promise.all(data.item.map(fetchFulltext));
         }
 
         // openai
