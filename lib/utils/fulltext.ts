@@ -51,11 +51,36 @@ const getImpressWatchContent = ($: CheerioAPI, pageUrl: string) => {
     }
 
     content.find('script, style, .affiliate_tag_multi, .article-pager, .pagination, .related, .recommend, .social-bookmark').remove();
+
+    content.find('.image-wrap').each((_, element) => {
+        const wrapper = $(element);
+        const media = wrapper.find('img, iframe').first();
+        if (!media.length) {
+            return;
+        }
+
+        media.removeAttr('class id style width height');
+
+        const mediaLink = media.closest('a').first();
+        const mediaBlock = $('<div class="rsshub-fulltext-media"></div>');
+        const mediaParagraph = $('<p></p>');
+        mediaParagraph.append(mediaLink.length ? mediaLink.clone().empty().append(media.clone()) : media.clone());
+        mediaBlock.append(mediaParagraph);
+
+        const caption = wrapper.find('.caption').first();
+        if (caption.length && caption.html()?.trim()) {
+            mediaBlock.append($('<p></p>').html(caption.html()!));
+        }
+
+        wrapper.replaceWith(mediaBlock);
+    });
+
+    content.find('img, iframe').removeAttr('class id style width height');
     return content.html() ?? undefined;
 };
 
 const fetchParsedPage = (pageUrl: string): Promise<ParsedPage> =>
-    cache.tryGet(`mercury-cache-page-v2-${pageUrl}`, async () => {
+    cache.tryGet(`mercury-cache-page-v3-${pageUrl}`, async () => {
         try {
             const { default: Parser } = await import('@jocmp/mercury-parser');
             const response = await ofetch(pageUrl);
@@ -127,7 +152,7 @@ const fetchAllPages = async (link: string) => {
 
 export async function fetchFulltext(item: DataItem): Promise<DataItem> {
     const { link, author, description } = item;
-    const parsedResult = await cache.tryGet<ParsedPage>(`mercury-cache-fulltext-v2-${link}`, () => {
+    const parsedResult = await cache.tryGet<ParsedPage>(`mercury-cache-fulltext-v3-${link}`, () => {
         if (!link) {
             return Promise.resolve({});
         }

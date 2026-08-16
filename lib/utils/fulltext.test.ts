@@ -46,6 +46,23 @@ describe('fetchFulltext', () => {
         expect(result.description).not.toContain('Sidebar content');
     });
 
+    it('normalizes Impress Watch media blocks for RSS readers', async () => {
+        const link = 'https://av.watch.impress.co.jp/docs/news/2132824.html';
+        pageHtml.set(
+            link,
+            '<article role="main"><div class="main-contents"><div class="image-wrap"><div class="img-wrap-h" style="width:480px;height:271px"><div class="img-wrap-w"><a href="https://example.com/image.jpg"><img class="resource" style="width:480px;height:271px" width="480" height="271" src="https://example.com/image.jpg"></a></div></div><span class="caption">Image caption</span></div><p>Article text starts here.</p></div></article>'
+        );
+
+        const result = await fetchFulltext({ title: 'Article', link, description: 'Summary' });
+
+        expect(result.description).toContain(
+            '<div class="rsshub-fulltext-media"><p><a href="https://example.com/image.jpg"><img src="https://example.com/image.jpg"></a></p><p>Image caption</p></div><p>Article text starts here.</p>'
+        );
+        expect(result.description).not.toContain('img-wrap-h');
+        expect(result.description).not.toContain('height="271"');
+        expect(result.description).not.toContain('style="width:480px');
+    });
+
     it('combines same-origin article pages', async () => {
         const firstPage = 'https://example.com/article/1';
         const secondPage = 'https://example.com/article/2';
