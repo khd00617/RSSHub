@@ -1,6 +1,7 @@
 import type { CheerioAPI } from 'cheerio';
 import { load } from 'cheerio';
 import * as entities from 'entities';
+import iconv from 'iconv-lite';
 
 import type { DataItem } from '@/types';
 import cache from '@/utils/cache';
@@ -12,6 +13,21 @@ type ParsedPage = {
     author?: string;
     content?: string;
     nextUrl?: string;
+};
+
+const getCharset = (contentType: string, html: string) => {
+    const charset = contentType.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1] ?? html.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1];
+    return charset?.toLowerCase() ?? 'utf-8';
+};
+
+const fetchHtml = async (pageUrl: string) => {
+    const response = await ofetch.raw(pageUrl, { responseType: 'arrayBuffer' });
+    const data = response._data;
+    const bytes = typeof data === 'string' ? data : new Uint8Array(data as ArrayBuffer);
+    const html = typeof bytes === 'string' ? bytes : iconv.decode(bytes, 'utf-8');
+    const charset = getCharset(response.headers.get('content-type') ?? '', html);
+
+    return charset === 'utf-8' ? html : iconv.decode(bytes, charset);
 };
 
 const getNextPageUrl = ($: CheerioAPI, pageUrl: string) => {
@@ -83,8 +99,8 @@ const fetchParsedPage = (pageUrl: string): Promise<ParsedPage> =>
     cache.tryGet(`mercury-cache-page-v3-${pageUrl}`, async () => {
         try {
             const { default: Parser } = await import('@jocmp/mercury-parser');
-            const response = await ofetch(pageUrl);
-            const $ = load(response);
+            const html = await fetchHtml(pageUrl);
+            const $ = load(html);
             const result = await Parser.parse(pageUrl, { html: $.html() });
 
             return {

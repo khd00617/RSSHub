@@ -1,4 +1,5 @@
 import parser from '@jocmp/mercury-parser';
+import iconv from 'iconv-lite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ofetch from '@/utils/ofetch';
@@ -18,7 +19,7 @@ vi.mock('@/utils/cache', () => ({
 }));
 
 vi.mock('@/utils/ofetch', () => ({
-    default: vi.fn(),
+    default: Object.assign(vi.fn(), { raw: vi.fn() }),
 }));
 
 const pageHtml = new Map<string, string>();
@@ -26,7 +27,11 @@ const pageHtml = new Map<string, string>();
 beforeEach(() => {
     vi.clearAllMocks();
     pageHtml.clear();
-    vi.mocked(ofetch).mockImplementation((url) => Promise.resolve(pageHtml.get(String(url)) ?? '<html></html>'));
+    vi.mocked(ofetch.raw).mockImplementation((url) => {
+        const html = pageHtml.get(String(url)) ?? '<html></html>';
+        const encodedHtml = new TextEncoder().encode(html);
+        return Promise.resolve({ headers: new Headers(), _data: encodedHtml }) as any;
+    });
     vi.mocked(parser.parse).mockImplementation((url) =>
         Promise.resolve({
             author: 'Author',
@@ -36,6 +41,17 @@ beforeEach(() => {
 });
 
 describe('fetchFulltext', () => {
+    it('decodes HTML using its meta charset declaration', async () => {
+        const link = 'https://example.com/article/shift-jis';
+        const html = '<meta charset="shift_jis"><p>日本語の記事本文です。</p>';
+        pageHtml.set(link, html);
+        vi.mocked(ofetch.raw).mockResolvedValue({ headers: new Headers(), _data: iconv.encode(html, 'shift_jis') } as any);
+
+        await fetchFulltext({ title: 'Article', link, description: 'Summary' });
+
+        expect(parser.parse).toHaveBeenCalledWith(link, expect.objectContaining({ html: expect.stringContaining('日本語の記事本文です。') }));
+    });
+
     it('uses the Impress Watch main content instead of a sidebar', async () => {
         const link = 'https://av.watch.impress.co.jp/docs/news/2132788.html';
         pageHtml.set(link, '<aside class="latest"><div class="body">Sidebar content</div></aside><article role="main"><div class="main-contents"><p>Actual article content from Impress Watch.</p></div></article>');
@@ -73,7 +89,7 @@ describe('fetchFulltext', () => {
 
         expect(result.author).toBe('Author');
         expect(result.description).toBe(`Content from ${firstPage} with enough text to be treated as extracted article content.<hr>Content from ${secondPage} with enough text to be treated as extracted article content.`);
-        expect(ofetch).toHaveBeenCalledTimes(2);
+        expect(ofetch.raw).toHaveBeenCalledTimes(2);
         expect(parser.parse).toHaveBeenCalledTimes(2);
     });
 
@@ -83,7 +99,7 @@ describe('fetchFulltext', () => {
 
         await fetchFulltext({ title: 'Article', link: firstPage, description: 'Summary' });
 
-        expect(ofetch).toHaveBeenCalledTimes(1);
+        expect(ofetch.raw).toHaveBeenCalledTimes(1);
         expect(parser.parse).toHaveBeenCalledTimes(1);
     });
 
@@ -95,7 +111,7 @@ describe('fetchFulltext', () => {
 
         await fetchFulltext({ title: 'Article', link: firstPage, description: 'Summary' });
 
-        expect(ofetch).toHaveBeenCalledTimes(2);
+        expect(ofetch.raw).toHaveBeenCalledTimes(2);
         expect(parser.parse).toHaveBeenCalledTimes(2);
     });
 });
