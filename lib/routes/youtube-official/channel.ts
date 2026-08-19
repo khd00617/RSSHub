@@ -142,16 +142,41 @@ function formatSummary(summary: string): string {
 }
 
 async function getVideoItemsFromPage(channelId: string): Promise<VideoItem[]> {
+    const [homePage, videosPage] = await Promise.all([getYouTubePage(channelId), getYouTubePage(channelId, 'videos')]);
+    const items = new Map<string, VideoItem>();
+
+    for (const page of [homePage, videosPage]) {
+        for (const item of parseVideoItemsFromPage(page)) {
+            const key = item.guid || item.link;
+            if (!key) {
+                continue;
+            }
+
+            const existing = items.get(key);
+            if (!existing || (!existing.pubDate && item.pubDate)) {
+                items.set(key, item);
+            }
+        }
+    }
+
+    return items.values().toArray().toSorted(sortVideoItems);
+}
+
+async function getYouTubePage(channelId: string, path = ''): Promise<string> {
     const response = await got({
         method: 'get',
-        url: new URL(`https://www.youtube.com/channel/${channelId}/videos`),
+        url: new URL(`https://www.youtube.com/channel/${channelId}/${path}`),
         headers: {
             'User-Agent': config.trueUA,
             'Accept-Language': 'ja-JP,ja;q=0.9,en;q=0.8',
         },
         responseType: 'text',
     });
-    const initialData = response.body.match(/ytInitialData = (\{.*?\});/)?.[1];
+    return response.body;
+}
+
+function parseVideoItemsFromPage(body: string): VideoItem[] {
+    const initialData = body.match(/ytInitialData = (\{.*?\});/)?.[1];
     if (!initialData) {
         return [];
     }
@@ -160,6 +185,19 @@ async function getVideoItemsFromPage(channelId: string): Promise<VideoItem[]> {
     const seenVideoIds = new Set<string>();
     collectVideoItems(JSON.parse(initialData), items, seenVideoIds);
     return items;
+}
+
+function sortVideoItems(left: VideoItem, right: VideoItem): number {
+    const leftTime = left.pubDate ? new Date(left.pubDate).getTime() : NaN;
+    const rightTime = right.pubDate ? new Date(right.pubDate).getTime() : NaN;
+
+    const leftMissing = Number.isNaN(leftTime);
+    const rightMissing = Number.isNaN(rightTime);
+    if (leftMissing || rightMissing) {
+        return leftMissing === rightMissing ? 0 : leftMissing ? 1 : -1;
+    }
+
+    return rightTime - leftTime;
 }
 
 function collectVideoItems(value: unknown, items: VideoItem[], seenVideoIds: Set<string>): void {
@@ -174,7 +212,7 @@ function collectVideoItems(value: unknown, items: VideoItem[], seenVideoIds: Set
         const thumbnailUrl = getRecord(Array.isArray(sources) ? sources[0] : undefined)?.url;
         const videoId = typeof thumbnailUrl === 'string' ? thumbnailUrl.match(/\/vi\/([^/]+)/)?.[1] : undefined;
         const title = getNestedString(lockup, ['metadata', 'lockupMetadataViewModel', 'title', 'content']);
-        const publishedText = getNestedString(lockup, ['metadata', 'lockupMetadataViewModel', 'metadata', 'contentMetadataViewModel', 'metadataRows', '0', 'metadataParts', '0', 'text', 'content']);
+        const publishedText = getPublishedText(lockup);
 
         if (videoId && title && !seenVideoIds.has(videoId)) {
             seenVideoIds.add(videoId);
@@ -183,7 +221,7 @@ function collectVideoItems(value: unknown, items: VideoItem[], seenVideoIds: Set
                 link: `https://www.youtube.com/watch?v=${videoId}`,
                 guid: videoId,
                 description: title,
-                pubDate: publishedText ? parseRelativeDate(publishedText) : undefined,
+                pubDate: parsePublishedDate(publishedText),
             });
         }
     }
@@ -208,6 +246,28 @@ function getNestedValue(value: unknown, path: string[]): unknown {
 function getNestedString(value: unknown, path: string[]): string | undefined {
     const nested = getNestedValue(value, path);
     return typeof nested === 'string' ? nested : undefined;
+}
+
+function getPublishedText(lockup: Record<string, unknown>): string | undefined {
+    const rows = getNestedValue(lockup, ['metadata', 'lockupMetadataViewModel', 'metadata', 'contentMetadataViewModel', 'metadataRows']);
+    if (!Array.isArray(rows)) {
+        return;
+    }
+
+    const texts = rows.flatMap((row) => {
+        const metadataParts = getRecord(row)?.metadataParts;
+        return Array.isArray(metadataParts) ? metadataParts.map((part) => getNestedString(part, ['text', 'content'])) : [];
+    });
+    return texts.findLast((text) => text && /\d+(?:\.\d+)?\s*(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?|時間|[秒分時日週月]|か月|ヶ月)\s*(?:ago|に配信済み|[前後])?/i.test(text));
+}
+
+function parsePublishedDate(text?: string): Date | undefined {
+    if (!text) {
+        return;
+    }
+
+    const date = parseRelativeDate(text.replaceAll(/か月|ヶ月/g, '月'));
+    return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 type VideoItem = {
