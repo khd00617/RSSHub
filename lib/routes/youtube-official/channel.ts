@@ -1,4 +1,3 @@
-import type { Item } from 'rss-parser';
 import Parser from 'rss-parser';
 
 import { config } from '@/config';
@@ -10,6 +9,7 @@ import logger from '@/utils/logger';
 import { parseDate } from '@/utils/parse-date';
 
 import { getSubtitlesByVideoId } from '../youtube/api/subtitles';
+import { getDataByChannelId as getYoutubeDataByChannelId } from '../youtube/api/youtubei';
 
 const parser = new Parser();
 const youtubeFeedUrl = 'https://www.youtube.com/feeds/videos.xml';
@@ -57,12 +57,27 @@ export const route: Route = {
         const channel = decodeURIComponent(rawChannel);
         const channelId = await resolveChannelId(channel);
 
-        const feed = await parser.parseURL(`${youtubeFeedUrl}?channel_id=${encodeURIComponent(channelId)}`);
-        const items = await Promise.all(feed.items.slice(0, maxItems).map((item) => createItem(item, apiKey)));
+        let title = 'YouTube channel';
+        let link = `https://www.youtube.com/channel/${channelId}`;
+        let sourceItems: VideoItem[];
+        try {
+            const feed = await parser.parseURL(`${youtubeFeedUrl}?channel_id=${encodeURIComponent(channelId)}`);
+            title = feed.title || title;
+            link = feed.link || link;
+            sourceItems = feed.items;
+        } catch (error) {
+            logger.warn(`YouTube RSS unavailable for ${channelId}, falling back to youtubei.js: ${error instanceof Error ? error.message : String(error)}`);
+            const data = await getYoutubeDataByChannelId({ channelId, embed: false, filterShorts: false, isJsonFeed: false });
+            title = data.title || title;
+            link = data.link || link;
+            sourceItems = data.item || [];
+        }
+
+        const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, apiKey)));
 
         return {
-            title: `${feed.title || 'YouTube channel'} - OpenCode Go summary`,
-            link: feed.link || `https://www.youtube.com/channel/${channelId}`,
+            title: `${title} - OpenCode Go summary`,
+            link,
             item: items,
             allowEmpty: true,
         };
@@ -123,9 +138,22 @@ function formatSummary(summary: string): string {
         .replaceAll('\n', '<br>');
 }
 
-async function createItem(item: Item, apiKey: string) {
+type VideoItem = {
+    title?: string;
+    link?: string;
+    guid?: string;
+    pubDate?: string | number | Date;
+    contentSnippet?: string;
+    content?: string | { html: string; text: string };
+    description?: string;
+    creator?: string;
+    author?: string | Array<{ name: string; url?: string; avatar?: string }>;
+};
+
+async function createItem(item: VideoItem, apiKey: string) {
     const videoId = extractVideoId(item.link) || item.guid?.split(':').at(-1);
-    const description = item.contentSnippet || item.content || `「${item.title || '動画'}」の要約を取得できませんでした。`;
+    const content = typeof item.content === 'string' ? item.content : item.content?.text || item.content?.html;
+    const description = item.contentSnippet || content || item.description || `「${item.title || '動画'}」の要約を取得できませんでした。`;
     let summary = description;
     try {
         summary = videoId ? await cache.tryGet(`youtube-opencode-summary:v4:${videoId}`, () => summarizeVideo(videoId, description, apiKey), 60 * 60 * 24 * 30, false) : description;
@@ -145,7 +173,7 @@ async function createItem(item: Item, apiKey: string) {
         description: `${embedHtml}${formattedSummary}`,
         pubDate: item.pubDate ? parseDate(item.pubDate) : undefined,
         guid: item.guid,
-        author: item.creator,
+        author: item.creator || item.author,
     };
 }
 
