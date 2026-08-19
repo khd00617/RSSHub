@@ -1,11 +1,21 @@
-app = "rsshub"
+app = "rsshub-khd00617"
+primary_region = "nrt"
+
+[build]
+dockerfile = "Dockerfile"
+
+[build.args]
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "0"
+
+[vm]
+memory = "512mb"
 
 [http_service]
 internal_port = 1200
 force_https = true
 auto_stop_machines = "suspend"
 auto_start_machines = true
-min_machines_running = 1
+min_machines_running = 0
 
 [[http_service.checks]]
 grace_period = "10s"

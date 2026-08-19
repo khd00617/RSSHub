@@ -77,6 +77,8 @@ type ConfigEnvKeys =
     | 'OPENAI_INPUT_OPTION'
     | 'OPENAI_PROMPT'
     | 'OPENAI_PROMPT_TITLE'
+    // OpenCode Go
+    | 'OPENCODE_API_KEY'
     // Follow
     | 'FOLLOW_OWNER_USER_ID'
     | 'FOLLOW_DESCRIPTION'
