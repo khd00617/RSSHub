@@ -70,10 +70,8 @@ export const route: Route = {
             const data = await getYoutubeDataByChannelId({ channelId, embed: false, filterShorts: false, isJsonFeed: false });
             title = data.title || title;
             link = data.link || link;
-            sourceItems = data.item || [];
-            if (sourceItems.length === 0) {
-                sourceItems = await getVideoItemsFromPage(channelId);
-            }
+            const pageItems = await getVideoItemsFromPage(channelId);
+            sourceItems = mergeVideoItems([...pageItems, ...(data.item || [])]);
         }
 
         const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, apiKey)));
@@ -143,23 +141,24 @@ function formatSummary(summary: string): string {
 
 async function getVideoItemsFromPage(channelId: string): Promise<VideoItem[]> {
     const [homePage, videosPage] = await Promise.all([getYouTubePage(channelId), getYouTubePage(channelId, 'videos')]);
-    const items = new Map<string, VideoItem>();
+    return mergeVideoItems([parseVideoItemsFromPage(homePage), parseVideoItemsFromPage(videosPage)].flat());
+}
 
-    for (const page of [homePage, videosPage]) {
-        for (const item of parseVideoItemsFromPage(page)) {
-            const key = item.guid || item.link;
-            if (!key) {
-                continue;
-            }
+function mergeVideoItems(items: VideoItem[]): VideoItem[] {
+    const merged = new Map<string, VideoItem>();
+    for (const item of items) {
+        const key = item.guid || item.link;
+        if (!key) {
+            continue;
+        }
 
-            const existing = items.get(key);
-            if (!existing || (!existing.pubDate && item.pubDate)) {
-                items.set(key, item);
-            }
+        const existing = merged.get(key);
+        if (!existing || (!existing.pubDate && item.pubDate)) {
+            merged.set(key, item);
         }
     }
 
-    return items.values().toArray().toSorted(sortVideoItems);
+    return merged.values().toArray().toSorted(sortVideoItems);
 }
 
 async function getYouTubePage(channelId: string, path = ''): Promise<string> {
