@@ -1,6 +1,6 @@
 import { Innertube } from 'youtubei.js';
 
-import type { Data } from '@/types';
+import type { Data, DataItem } from '@/types';
 import cache from '@/utils/cache';
 import { parseRelativeDate } from '@/utils/parse-date';
 
@@ -36,6 +36,29 @@ export const getChannelIdByUsername = (username: string) =>
 export const getDataByUsername = async ({ username, embed, filterShorts, isJsonFeed }: { username: string; embed: boolean; filterShorts: boolean; isJsonFeed: boolean }): Promise<Data> => {
     const channelId = (await getChannelIdByUsername(username)) as string;
     return getDataByChannelId({ channelId, embed, filterShorts, isJsonFeed });
+};
+
+export const getRecentDataByChannelId = async ({ channelId, query }: { channelId: string; query: string }): Promise<DataItem[]> => {
+    const innertube = await getInnertube();
+    const search = await innertube.search(query, { type: 'video', upload_date: 'month' });
+    const videos = search.videos as Array<{
+        video_id: string;
+        title: { text: string };
+        description_snippet?: { text: string };
+        author?: { id?: string; name?: string };
+        published?: { text?: string };
+    }>;
+
+    return videos
+        .filter((video) => video.author?.id === channelId && video.published?.text)
+        .map((video) => ({
+            title: video.title.text,
+            description: video.description_snippet?.text,
+            link: `https://www.youtube.com/watch?v=${video.video_id}`,
+            guid: video.video_id,
+            pubDate: parseRelativeDate(video.published?.text || ''),
+            author: video.author?.name,
+        }));
 };
 
 export const getDataByChannelId = async ({ channelId, embed, isJsonFeed }: { channelId: string; embed: boolean; filterShorts: boolean; isJsonFeed: boolean }): Promise<Data> => {

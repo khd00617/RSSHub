@@ -9,7 +9,7 @@ import logger from '@/utils/logger';
 import { parseDate, parseRelativeDate } from '@/utils/parse-date';
 
 import { getSubtitlesByVideoId } from '../youtube/api/subtitles';
-import { getDataByChannelId as getYoutubeDataByChannelId } from '../youtube/api/youtubei';
+import { getDataByChannelId as getYoutubeDataByChannelId, getRecentDataByChannelId } from '../youtube/api/youtubei';
 
 const parser = new Parser();
 const youtubeFeedUrl = 'https://www.youtube.com/feeds/videos.xml';
@@ -71,7 +71,13 @@ export const route: Route = {
             title = data.title || title;
             link = data.link || link;
             const pageItems = await getVideoItemsFromPage(channelId);
-            sourceItems = mergeVideoItems([...pageItems, ...(data.item || [])]);
+            let searchItems: VideoItem[] = [];
+            try {
+                searchItems = await getRecentDataByChannelId({ channelId, query: title.replace(/\s+- YouTube$/, '') });
+            } catch (error) {
+                logger.warn(`YouTube search unavailable for ${channelId}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            sourceItems = mergeVideoItems([...pageItems, ...searchItems, ...(data.item || [])]);
         }
 
         const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, apiKey)));
