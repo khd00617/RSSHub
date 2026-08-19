@@ -10,7 +10,8 @@
 | ---------- | --------------------------------------------------------------------- |
 | ベース     | [RSSHub](https://github.com/DIYgod/RSSHub)                            |
 | デプロイ先 | Fly.io（アプリ名: `rsshub-khd00617`）                                 |
-| 主要ルート | `/youtube-official/channel/:id` — YouTube 公式 RSS + OpenCode Go 要約 |
+| 公開URL    | <https://rsshub-khd00617.fly.dev/>                                    |
+| 主要ルート | `/youtube-official/channel/:id` — YouTube 最新動画 + OpenCode Go 要約 |
 
 ---
 
@@ -18,25 +19,27 @@
 
 ### 主要ファイル
 
-| ファイル/ディレクトリ          | 説明                                                 |
-| ------------------------------ | ---------------------------------------------------- |
-| `fly.toml`                     | Fly.io アプリ設定（ポート 1200、ヘルスチェックなど） |
-| `Dockerfile`                   | マルチステージビルドの Dockerfile                    |
-| `lib/config.ts`                | 環境変数定義（`OPENCODE_API_KEY` を含む）            |
-| `lib/middleware/cache.ts`      | 通常ルートと `/fulltext` のレスポンスキャッシュ      |
-| `lib/utils/fulltext.ts`        | RSS記事の全文取得、文字コード復号、複数ページ結合    |
-| `lib/utils/fulltext.test.ts`   | 全文取得と文字コード処理のテスト                     |
-| `lib/routes/youtube-official/` | YouTube 公式 RSS + OpenCode Go 要約ルート            |
-| `lib/routes/cruise-mag/`       | クルーズマガジンニュースルート                       |
-| `package.json`                 | ビルドスクリプト、依存関係                           |
-| `scripts/docker/`              | Docker イメージ最適化スクリプト                      |
+| ファイル/ディレクトリ                | 説明                                                 |
+| ------------------------------------ | ---------------------------------------------------- |
+| `fly.toml`                           | Fly.io アプリ設定（ポート 1200、ヘルスチェックなど） |
+| `Dockerfile`                         | マルチステージビルドの Dockerfile                    |
+| `lib/config.ts`                      | 環境変数定義（`OPENCODE_API_KEY` を含む）            |
+| `lib/middleware/cache.ts`            | 通常ルートと `/fulltext` のレスポンスキャッシュ      |
+| `lib/utils/fulltext.ts`              | RSS記事の全文取得、文字コード復号、複数ページ結合    |
+| `lib/utils/fulltext.test.ts`         | 全文取得と文字コード処理のテスト                     |
+| `lib/routes/youtube-official/`       | YouTube 最新動画 + OpenCode Go 要約ルート            |
+| `lib/routes/youtube/api/youtubei.ts` | YouTube 内部 API と検索による取得処理                |
+| `lib/routes/cruise-mag/`             | クルーズマガジンニュースルート                       |
+| `.dockerignore`                      | Docker ビルドコンテキストから不要ファイルを除外      |
+| `package.json`                       | ビルドスクリプト、依存関係                           |
+| `scripts/docker/`                    | Docker イメージ最適化スクリプト                      |
 
 ### カスタムルート一覧
 
-| ルート                          | 説明                                               |
-| ------------------------------- | -------------------------------------------------- |
-| `/youtube-official/channel/:id` | YouTube チャンネルの最新動画を RSS + AI 要約で配信 |
-| `/cruise-mag/news`              | クルーズマガジンのニュース一覧を RSS 配信          |
+| ルート                          | 説明                                              |
+| ------------------------------- | ------------------------------------------------- |
+| `/youtube-official/channel/:id` | YouTube チャンネルの最新5件を RSS + AI 要約で配信 |
+| `/cruise-mag/news`              | クルーズマガジンのニュース一覧を RSS 配信         |
 
 ---
 
@@ -46,10 +49,12 @@
 
 ```text
 lib/routes/youtube-official/
-├── channel.ts          # メインルート: チャンネル ID / ハンドル → RSS + 要約
+├── channel.ts          # メインルート: チャンネル ID / ハンドル → 最新動画 + 要約
 ├── namespace.ts        # 名前空間定義
-└── api/
-    └── subtitles.ts    # YouTube 字幕取得
+
+lib/routes/youtube/api/
+├── subtitles.ts        # YouTube 字幕取得
+└── youtubei.ts         # YouTube 内部 API と検索結果の取得
 ```
 
 ### エンドポイント
@@ -75,23 +80,31 @@ flowchart LR
     A[リクエスト<br/>/channel/:id] --> B{id の形式}
     B -->|UC...| C[チャンネル ID として使用]
     B -->|@...| D[YouTube ページから<br/>チャンネル ID を解決]
-    C --> E[YouTube 公式 RSS<br/>から最新 5 件取得]
+    C --> E[YouTube 公式 RSS<br/>から動画を取得]
     D --> E
-    E --> F[各動画の字幕を取得]
-    F --> G{字幕あり?}
-    G -->|Yes| H[OpenCode Go API<br/>で日本語要約]
-    G -->|No| I[動画説明文を<br/>そのまま使用]
-    H --> J[Redis にキャッシュ]
-    J --> K[RSS 出力]
-    I --> K
+    E -->|成功| H[RSS アイテムを使用]
+    E -->|404 / 5xx| F[youtubei.js と<br/>チャンネルページを取得]
+    F --> G[YouTube 検索結果も<br/>チャンネル ID で絞り込み]
+    G --> I[重複除去・公開日時順に<br/>並べ替え・最新5件を選択]
+    H --> J[各動画の字幕を取得]
+    I --> J
+    J --> K{字幕あり?}
+    K -->|Yes| L[OpenCode Go API<br/>で日本語要約]
+    K -->|No| M[動画説明文を<br/>そのまま使用]
+    L --> N[Redis にキャッシュ]
+    M --> N
+    N --> O[RSS 出力]
 ```
 
 ### 主な機能
 
 - **チャンネル ID 解決**: ハンドル形式 (`@...`) の場合、YouTube ページから `UC...` 形式のチャンネル ID を抽出
+- **公式 RSS の利用**: YouTube 公式 Atom RSS が正常に応答する場合は、そのアイテムを使用
+- **複数フォールバック**: 公式 RSS が `404` または `5xx` の場合は、`youtubei.js`、チャンネルホーム、`/videos` ページ、直近1か月を対象にした YouTube 検索から取得
+- **最新動画の選択**: 各取得元の動画をチャンネル ID で確認し、動画 ID で重複除去した後、公開日時の新しい順に並べて最大5件を出力
 - **字幕取得**: `getSubtitlesByVideoId()` で字幕を取得し、タイムスタンプ行を除去
 - **AI 要約**: 字幕を OpenCode Go API (`deepseek-v4-flash`) に送信し、日本語要約を生成
-- **キャッシュ**: 要約結果は Redis にキャッシュ（キー: `youtube-opencode-summary:v4:{videoId}`、有効期限 30 日）
+- **キャッシュ**: ルートレスポンスは `youtube-official-v2` 世代、要約結果は `youtube-opencode-summary:v4:{videoId}` としてキャッシュ（要約の有効期限は30日）
 - **埋め込みプレイヤー**: RSS の `description` 先頭に YouTube 埋め込みプレイヤー (`<iframe>`) を挿入
 - **エラーハンドリング**: 字幕取得失敗時は動画説明文をフォールバックとして使用
 
@@ -100,6 +113,8 @@ flowchart LR
 | 変数名             | 必須 | 説明                 |
 | ------------------ | ---- | -------------------- |
 | `OPENCODE_API_KEY` | ✅   | OpenCode Go API キー |
+
+ローカルではプロジェクト直下の `.env` に設定します。Fly.io では `.env` をデプロイせず、Secret として設定します。
 
 ---
 
@@ -148,15 +163,18 @@ RSSフィード自体がUTF-8でも、リンク先の記事ページは記事カ
 
 ### キャッシュ世代
 
-全文取得のキャッシュキーは、レスポンス形式や文字コード処理を変更した際に世代を更新します。現在の世代は次のとおりです。
+レスポンスや解析方法を変更した場合は、古い結果を返さないようキャッシュキーの世代を更新します。現在の世代は次のとおりです。
 
-| 対象                           | キーの世代                  | 定義場所                  |
-| ------------------------------ | --------------------------- | ------------------------- |
-| `/fulltext` のルートレスポンス | `fulltext-v4`               | `lib/middleware/cache.ts` |
-| 記事ページの解析結果           | `mercury-cache-page-v4`     | `lib/utils/fulltext.ts`   |
-| 記事ごとの全文結果             | `mercury-cache-fulltext-v4` | `lib/utils/fulltext.ts`   |
+| 対象                                   | キーの世代                    | 定義場所                                 |
+| -------------------------------------- | ----------------------------- | ---------------------------------------- |
+| `/fulltext` のルートレスポンス         | `fulltext-v4`                 | `lib/middleware/cache.ts`                |
+| `/youtube-official` のルートレスポンス | `youtube-official-v2`         | `lib/middleware/cache.ts`                |
+| 記事ページの解析結果                   | `mercury-cache-page-v4`       | `lib/utils/fulltext.ts`                  |
+| 記事ごとの全文結果                     | `mercury-cache-fulltext-v4`   | `lib/utils/fulltext.ts`                  |
+| YouTube 要約結果                       | `youtube-opencode-summary:v4` | `lib/routes/youtube-official/channel.ts` |
 
 キャッシュを更新せずにデプロイすると、修正済みコードでも過去の文字化け結果が返ることがあります。全文取得の解析方法を変更した場合は、外側のルートキャッシュと内側の全文キャッシュを同時に更新してください。
+YouTube の取得元や最新動画の選定方法を変更した場合も、`youtube-official` のキャッシュ世代を更新してください。
 
 ---
 
@@ -168,6 +186,12 @@ RSSフィード自体がUTF-8でも、リンク先の記事ページは記事カ
 | `CACHE_TYPE`       |      | `memory`   | キャッシュ方式。本番では `redis` 推奨             |
 | `REDIS_URL`        |      | —          | Redis 接続文字列（`CACHE_TYPE=redis` の場合必須） |
 | `PORT`             |      | `1200`     | 内部ポート                                        |
+
+ローカル開発では、プロジェクト直下の `.env` に秘密値を設定します。`.env` は Git にコミットしません。
+
+```env
+OPENCODE_API_KEY=<OpenCode Go API key>
+```
 
 ---
 
@@ -191,6 +215,8 @@ flowchart LR
 | `chromium-downloader` | `node:24-trixie-slim` | Chromium ダウンロード（任意）            |
 | `app`                 | `node:24-trixie-slim` | 最小実行イメージ                         |
 
+`.dockerignore` で `.git/objects`、`dist`、開発用設定、テスト用ディレクトリなどをビルドコンテキストから除外します。`docker-minifier` はビルド後に `lib`、`scripts`、開発依存関係を最終イメージから除去します。
+
 ### ローカルビルド・チェック
 
 ```powershell
@@ -200,6 +226,9 @@ corepack pnpm exec oxlint lib/routes/youtube-official/channel.ts
 
 # 本番ビルド
 corepack pnpm run build
+
+# 開発サーバー
+corepack pnpm dev
 ```
 
 成功すると `dist/` 以下にルートごとの `.mjs` が生成されます。
@@ -226,6 +255,14 @@ Invoke-WebRequest -Uri 'http://localhost:1200/fulltext/rss.itmedia.co.jp/rss/2.0
 ```
 
 レスポンス本文に `�` が含まれていないことを確認します。メモリキャッシュが残っている場合は開発サーバーを再起動してください。
+
+YouTube 公式ルートを確認する場合:
+
+```powershell
+Invoke-WebRequest -Uri 'http://localhost:1200/youtube-official/channel/@3.0' -UseBasicParsing
+```
+
+公式 RSS が `404` を返すチャンネルでも、チャンネルページ・`youtubei.js`・YouTube 検索から動画を取得し、最新5件の `<item>` が返ることを確認します。
 
 ---
 
@@ -260,7 +297,7 @@ flyctl secrets set REDIS_URL="redis://..." --app rsshub-khd00617
 ### 2. Fly.io へデプロイ
 
 ```powershell
-flyctl deploy --app rsshub-khd00617 --remote-only --yes
+flyctl deploy --config fly.toml --remote-only
 ```
 
 ビルド・イメージ作成・ロールアウトが自動で行われます。
@@ -301,7 +338,7 @@ Invoke-WebRequest -Uri 'https://rsshub-khd00617.fly.dev/fulltext/rss.itmedia.co.
 Invoke-WebRequest -Uri 'https://rsshub-khd00617.fly.dev/youtube-official/channel/UCJHLwoEJ55msgoxeiqJjOvA' -UseBasicParsing
 
 # ハンドル指定 (@...)
-Invoke-WebRequest -Uri 'https://rsshub-khd00617.fly.dev/youtube-official/channel/%40%E3%82%A2%E3%82%B4%E3%83%A9%E3%83%81%E3%83%A3%E3%83%B3%E3%83%8D%E3%83%AB' -UseBasicParsing
+Invoke-WebRequest -Uri 'https://rsshub-khd00617.fly.dev/youtube-official/channel/@3.0' -UseBasicParsing
 ```
 
 期待するレスポンス:
@@ -309,7 +346,7 @@ Invoke-WebRequest -Uri 'https://rsshub-khd00617.fly.dev/youtube-official/channel
 - `Status: 200`
 - `Content-Type: application/xml; charset=utf-8`
 - 5 件の `<item>` を含む
-- エラーメッセージ（`Could not resolve` / `要約を取得できませんでした`）が含まれない
+- 各 `<item><link>` が `https://www.youtube.com/watch?v=...` または `https://www.youtube.com/shorts/...` の元動画URLを保持する
 
 ---
 
@@ -358,10 +395,20 @@ Gitの認証ユーザーがリポジトリの所有者または書き込み権�
 Fly.io では過去の Machine バージョンのログも表示されます。
 現在のイメージとログのタイムスタンプを確認して、正しいバージョンのログを参照してください。
 
-### 503 + Status code 404 / 500
+### YouTube 公式ルートが 503 + Status code 404 になる
 
-- **404**: ルートパラメーターの URL デコードが正しく行われていない可能性があります。`decodeURIComponent()` が適用されているか確認してください。
-- **500**: YouTube サーバーからの応答エラー。`User-Agent` と `Accept-Language` ヘッダーを適切に設定してください。
+YouTube のチャンネルページが正常でも、公式 Atom RSS (`/feeds/videos.xml`) が `404` を返す場合があります。この場合は API キーやチャンネルハンドルの誤りとは限りません。
+
+- Fly のログに `YouTube RSS unavailable` が出ていることを確認する
+- `youtubei.js`、チャンネルホーム、`/videos` ページ、YouTube 検索の取得結果が統合されることを確認する
+- 動画 ID が対象チャンネルのものだけか、公開日時順に並んでいるかを確認する
+- 古い動画が残る場合は `youtube-official-v2` キャッシュ世代が反映された最新イメージか確認する
+
+公開 RSS が正常に返る場合は公式 RSS のアイテムをそのまま使用します。初回取得は字幕取得と OpenCode Go 要約のため時間がかかる場合がありますが、要約キャッシュ後は短縮されます。
+
+### YouTube 公式ルートが 503 + Status code 500 になる
+
+YouTube 側または取得元の応答エラーです。チャンネルページ取得に `User-Agent` と `Accept-Language` が設定されているか、Fly の最新ログに外部 API のエラーがないか確認してください。
 
 ### 503 + Health check failing
 
@@ -384,23 +431,37 @@ API キーが露出した場合:
 flyctl secrets set OPENCODE_API_KEY="<新しいキー>" --app rsshub-khd00617
 
 # 3. 再デプロイ
-flyctl deploy --app rsshub-khd00617
+flyctl deploy --config fly.toml --remote-only
 ```
 
 ---
 
 ## 変更履歴
 
+### 2026-08-19: YouTube 最新動画の取得経路を拡張
+
+**対象**: `lib/routes/youtube-official/channel.ts`、`lib/routes/youtube/api/youtubei.ts`、`lib/middleware/cache.ts`
+
+**変更内容**:
+
+- YouTube 公式 Atom RSS が `404` / `5xx` の場合に処理を継続するフォールバックを追加
+- YouTube チャンネルホームと `/videos` ページの `ytInitialData` を解析
+- `youtubei.js` のチャンネル取得結果と、対象チャンネル ID で絞った YouTube 検索結果を統合
+- 動画 ID の重複を除去し、公開日時の新しい順に並べて最新5件を出力
+- 日本語の相対日時（`か月前`、`ヶ月前` など）を正規化して比較
+- `/youtube-official` のレスポンスキャッシュを `youtube-official-v2` 世代へ更新
+- RSS アイテムのリンクは各動画の元 URL（`watch?v=...` または `shorts/...`）を保持
+
 ### 新規ルート作成
 
 #### youtube-official
 
-`lib/routes/youtube-official/` に YouTube 公式 RSS + OpenCode Go 要約ルートを新規作成。
+`lib/routes/youtube-official/` に YouTube 最新動画 + OpenCode Go 要約ルートを新規作成。
 
-| ファイル       | 説明                                                |
-| -------------- | --------------------------------------------------- |
-| `channel.ts`   | メインルート: チャンネル ID / ハンドル → RSS + 要約 |
-| `namespace.ts` | 名前空間定義 (`YouTube Official RSS`)               |
+| ファイル       | 説明                                                     |
+| -------------- | -------------------------------------------------------- |
+| `channel.ts`   | メインルート: チャンネル ID / ハンドル → 最新動画 + 要約 |
+| `namespace.ts` | 名前空間定義 (`YouTube Official RSS`)                    |
 
 開発の経緯:
 
@@ -425,6 +486,7 @@ flyctl deploy --app rsshub-khd00617
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fly.toml`      | アプリ名を `rsshub` → `rsshub-khd00617` に変更、`primary_region = "nrt"` 追加、ビルド設定追加、`[vm] memory = "512mb"` 追加、`min_machines_running` を `1` → `0` に変更 |
 | `lib/config.ts` | `OPENCODE_API_KEY` 環境変数を型定義に追加                                                                                                                               |
+| `.dockerignore` | `.git/objects` と `dist` などを除外し、Docker ビルドコンテキストを削減                                                                                                  |
 
 ### 2026-08-18: fulltext の日本語文字化け修正
 
