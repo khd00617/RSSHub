@@ -6,7 +6,7 @@ import type { Route } from '@/types';
 import cache from '@/utils/cache';
 import got from '@/utils/got';
 import logger from '@/utils/logger';
-import { parseDate } from '@/utils/parse-date';
+import { parseDate, parseRelativeDate } from '@/utils/parse-date';
 
 import { getSubtitlesByVideoId } from '../youtube/api/subtitles';
 import { getDataByChannelId as getYoutubeDataByChannelId } from '../youtube/api/youtubei';
@@ -71,6 +71,9 @@ export const route: Route = {
             title = data.title || title;
             link = data.link || link;
             sourceItems = data.item || [];
+            if (sourceItems.length === 0) {
+                sourceItems = await getVideoItemsFromPage(channelId);
+            }
         }
 
         const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, apiKey)));
@@ -136,6 +139,75 @@ function formatSummary(summary: string): string {
         .join('\n')
         .replaceAll(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replaceAll('\n', '<br>');
+}
+
+async function getVideoItemsFromPage(channelId: string): Promise<VideoItem[]> {
+    const response = await got({
+        method: 'get',
+        url: new URL(`https://www.youtube.com/channel/${channelId}/videos`),
+        headers: {
+            'User-Agent': config.trueUA,
+            'Accept-Language': 'ja-JP,ja;q=0.9,en;q=0.8',
+        },
+        responseType: 'text',
+    });
+    const initialData = response.body.match(/ytInitialData = (\{.*?\});/)?.[1];
+    if (!initialData) {
+        return [];
+    }
+
+    const items: VideoItem[] = [];
+    const seenVideoIds = new Set<string>();
+    collectVideoItems(JSON.parse(initialData), items, seenVideoIds);
+    return items;
+}
+
+function collectVideoItems(value: unknown, items: VideoItem[], seenVideoIds: Set<string>): void {
+    if (!value || typeof value !== 'object') {
+        return;
+    }
+
+    const record = value as Record<string, unknown>;
+    const lockup = getRecord(record.lockupViewModel);
+    if (lockup) {
+        const sources = getNestedValue(lockup, ['contentImage', 'thumbnailViewModel', 'image', 'sources']);
+        const thumbnailUrl = getRecord(Array.isArray(sources) ? sources[0] : undefined)?.url;
+        const videoId = typeof thumbnailUrl === 'string' ? thumbnailUrl.match(/\/vi\/([^/]+)/)?.[1] : undefined;
+        const title = getNestedString(lockup, ['metadata', 'lockupMetadataViewModel', 'title', 'content']);
+        const publishedText = getNestedString(lockup, ['metadata', 'lockupMetadataViewModel', 'metadata', 'contentMetadataViewModel', 'metadataRows', '0', 'metadataParts', '0', 'text', 'content']);
+
+        if (videoId && title && !seenVideoIds.has(videoId)) {
+            seenVideoIds.add(videoId);
+            items.push({
+                title,
+                link: `https://www.youtube.com/watch?v=${videoId}`,
+                guid: videoId,
+                description: title,
+                pubDate: publishedText ? parseRelativeDate(publishedText) : undefined,
+            });
+        }
+    }
+
+    for (const child of Object.values(record)) {
+        collectVideoItems(child, items, seenVideoIds);
+    }
+}
+
+function getRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+}
+
+function getNestedValue(value: unknown, path: string[]): unknown {
+    let current = value;
+    for (const key of path) {
+        current = getRecord(current)?.[key];
+    }
+    return current;
+}
+
+function getNestedString(value: unknown, path: string[]): string | undefined {
+    const nested = getNestedValue(value, path);
+    return typeof nested === 'string' ? nested : undefined;
 }
 
 type VideoItem = {
