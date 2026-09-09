@@ -28,6 +28,7 @@
 | `lib/utils/fulltext.ts`              | RSS記事の全文取得、文字コード復号、複数ページ結合    |
 | `lib/utils/fulltext.test.ts`         | 全文取得と文字コード処理のテスト                     |
 | `lib/routes/youtube-official/`       | YouTube 最新動画 + OpenCode Go 要約ルート            |
+| `docs/youtube-latest-videos.md`      | 最新動画取得(公式 RSS / フォールバック)の知見        |
 | `lib/routes/youtube/api/youtubei.ts` | YouTube 内部 API と検索による取得処理                |
 | `lib/routes/cruise-mag/`             | クルーズマガジンニュースルート                       |
 | `.dockerignore`                      | Docker ビルドコンテキストから不要ファイルを除外      |
@@ -100,11 +101,11 @@ flowchart LR
 
 - **チャンネル ID 解決**: ハンドル形式 (`@...`) の場合、YouTube ページから `UC...` 形式のチャンネル ID を抽出
 - **公式 RSS の利用**: YouTube 公式 Atom RSS が正常に応答する場合は、そのアイテムを使用
-- **複数フォールバック**: 公式 RSS が `404` または `5xx` の場合は、`youtubei.js`、チャンネルホーム、`/videos` ページ、直近1か月を対象にした YouTube 検索から取得
+- **複数フォールバック**: 公式 RSS が `404` または `5xx` の場合(3 回リトライ後)は、`youtubei.js`(動画タブ + ライブ配信タブ)、チャンネルホーム、`/videos` ページ、直近1か月を対象にした YouTube 検索から取得
 - **最新動画の選択**: 各取得元の動画をチャンネル ID で確認し、動画 ID で重複除去した後、公開日時の新しい順に並べて最大5件を出力
 - **字幕取得**: `getSubtitlesByVideoId()` で字幕を取得し、タイムスタンプ行を除去
 - **AI 要約**: 字幕を OpenCode Go API (`deepseek-v4-flash`) に送信し、日本語要約を生成
-- **キャッシュ**: ルートレスポンスは `youtube-official-v2` 世代、要約結果は `youtube-opencode-summary:v4:{videoId}` としてキャッシュ（要約の有効期限は30日）
+- **キャッシュ**: ルートレスポンスは `youtube-official-v3` 世代、要約結果は `youtube-opencode-summary:v5:{videoId}` としてキャッシュ（要約の有効期限は30日）。要約生成に失敗した場合はキャッシュせずフォールバックを使用
 - **埋め込みプレイヤー**: RSS の `description` 先頭に YouTube 埋め込みプレイヤー (`<iframe>`) を挿入
 - **エラーハンドリング**: 字幕取得失敗時は動画説明文をフォールバックとして使用
 
@@ -168,10 +169,10 @@ RSSフィード自体がUTF-8でも、リンク先の記事ページは記事カ
 | 対象                                   | キーの世代                    | 定義場所                                 |
 | -------------------------------------- | ----------------------------- | ---------------------------------------- |
 | `/fulltext` のルートレスポンス         | `fulltext-v4`                 | `lib/middleware/cache.ts`                |
-| `/youtube-official` のルートレスポンス | `youtube-official-v2`         | `lib/middleware/cache.ts`                |
+| `/youtube-official` のルートレスポンス | `youtube-official-v3`         | `lib/middleware/cache.ts`                |
 | 記事ページの解析結果                   | `mercury-cache-page-v4`       | `lib/utils/fulltext.ts`                  |
 | 記事ごとの全文結果                     | `mercury-cache-fulltext-v4`   | `lib/utils/fulltext.ts`                  |
-| YouTube 要約結果                       | `youtube-opencode-summary:v4` | `lib/routes/youtube-official/channel.ts` |
+| YouTube 要約結果                       | `youtube-opencode-summary:v5` | `lib/routes/youtube-official/channel.ts` |
 
 キャッシュを更新せずにデプロイすると、修正済みコードでも過去の文字化け結果が返ることがあります。全文取得の解析方法を変更した場合は、外側のルートキャッシュと内側の全文キャッシュを同時に更新してください。
 YouTube の取得元や最新動画の選定方法を変更した場合も、`youtube-official` のキャッシュ世代を更新してください。
@@ -402,9 +403,17 @@ YouTube のチャンネルページが正常でも、公式 Atom RSS (`/feeds/vi
 - Fly のログに `YouTube RSS unavailable` が出ていることを確認する
 - `youtubei.js`、チャンネルホーム、`/videos` ページ、YouTube 検索の取得結果が統合されることを確認する
 - 動画 ID が対象チャンネルのものだけか、公開日時順に並んでいるかを確認する
-- 古い動画が残る場合は `youtube-official-v2` キャッシュ世代が反映された最新イメージか確認する
+- 古い動画が残る場合は `youtube-official-v3` キャッシュ世代が反映された最新イメージか確認する
 
 公開 RSS が正常に返る場合は公式 RSS のアイテムをそのまま使用します。初回取得は字幕取得と OpenCode Go 要約のため時間がかかる場合がありますが、要約キャッシュ後は短縮されます。
+
+### OpenCode Go API が 400 Bad Request (MissingSessionID) になる
+
+OpenCode Go は `x-opencode-session` ヘッダー（会話ごとに安定したセッション ID）と独自の `User-Agent` を要求します。ヘッダーがないリクエストは `400 MissingSessionID` で拒否されます。
+
+- `lib/routes/youtube-official/channel.ts` の `summarizeVideo()` で両ヘッダーを送信しているか確認する
+- エラーメッセージ例: `Request is missing x-opencode-session and cannot be routed efficiently`
+- 詳細は <https://opencode.ai/docs/go/#where-can-i-use-it> を参照
 
 ### YouTube 公式ルートが 503 + Status code 500 になる
 
@@ -437,6 +446,33 @@ flyctl deploy --config fly.toml --remote-only
 ---
 
 ## 変更履歴
+
+### 2026-09-09: フォールバック経路の安定化(最新動画の取得確率向上)
+
+**対象**: `lib/routes/youtube-official/channel.ts`、`lib/routes/youtube/api/youtubei.ts`
+
+**変更内容**:
+
+- YouTube 公式 RSS 取得に 3 回・1.5 秒間隔のリトライを追加(`parser.parseURL` から got + `parseString` に変更し UA / Accept-Language も制御)
+- youtubei.js の `getLiveStreams()`(ライブ配信タブ)を `getDataByChannelId` の `includeLive` オプションでマージ。ライブ配信・プレミア公開の取りこぼしを防止(標準ルートはデフォルト false で影響なし)
+- チャンネルページ解析(`ytInitialData`)が 0 件のとき 1 回再取得
+- YouTube の InnerTube 応答が新形式 `LockupView` に移行したため、動画タブ・ライブタブのアイテムを新形式で解析(`content_id` / `metadata.title` / `metadata_rows` から日時抽出)。旧形式も引き続きサポート
+- 日本語ロケール(`lang: 'ja'`, `location: 'JP'`)で youtubei.js を実行し、タイトルを日本語化
+- 日本語相対日時の正規化を強化: 「1 か月前」「1 ヶ月前」→「1 月前」、ライブ配信の「7 時間前 に配信済み」(スペース含む)→「7 時間前」。パース不能な場合は Invalid Date ではなく undefined を返す
+- マージキーを動画 ID に正規化(RSS guid `yt:video:ID` / ページ guid `ID` / youtubei の link の混在で重複が残る問題を修正)。先頭ソースのフィールドを優先し、欠けているフィールドのみ後続ソースで補完
+- ページ解析アイテムの pubDate 欠落時、新着順リスティングの隣接アイテムから日時を補間
+- 出力の pubDate に Invalid Date が混入しないようガードを追加
+
+### 2026-09-09: OpenCode Go セッションヘッダー要件への対応
+
+**対象**: `lib/routes/youtube-official/channel.ts`、`lib/middleware/cache.ts`
+
+**変更内容**:
+
+- OpenCode Go API リクエストに `x-opencode-session`（動画ごとに安定したセッション ID）と独自 `User-Agent` を追加。ヘッダー欠落時は API が `400 MissingSessionID` で拒否するため
+- 要約生成に失敗した場合に失敗結果（エラーメッセージや AI の「文字起こしなし」応答）が30日間キャッシュされる問題を修正。失敗時は例外を投げてキャッシュしない
+- 「要約を取得できませんでした」のプレースホルダーを AI への入力に使わないよう分離
+- 要約キャッシュキーを `v4` → `v5` に、ルートレスポンスキャッシュを `youtube-official-v2` → `v3` に更新し、汚染済みキャッシュを無効化
 
 ### 2026-08-19: YouTube 最新動画の取得経路を拡張
 

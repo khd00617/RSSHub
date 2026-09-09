@@ -21,7 +21,8 @@ const middleware: MiddlewareHandler = async (ctx, next) => {
     const requestPath = ctx.req.path;
     const format = `:${ctx.req.query('format') || config.format}`;
     const limit = ctx.req.query('limit') ? `:${ctx.req.query('limit')}` : '';
-    const cachePath = requestPath.startsWith('/fulltext/') ? `fulltext-v4:${requestPath}` : requestPath.startsWith('/youtube-official/') ? `youtube-official-v2:${requestPath}` : requestPath;
+    // Bump the generation when route output changes so stale production responses are invalidated.
+    const cachePath = requestPath.startsWith('/fulltext/') ? `fulltext-v4:${requestPath}` : requestPath.startsWith('/youtube-official/') ? `youtube-official-v3:${requestPath}` : requestPath;
     const key = 'rsshub:koa-redis-cache:' + h64ToString(cachePath + format + limit);
     const controlKey = 'rsshub:path-requested:' + h64ToString(cachePath + format + limit);
 
