@@ -15,7 +15,7 @@ import { getDataByChannelId as getYoutubeDataByChannelId, getRecentDataByChannel
 const parser = new Parser();
 const youtubeFeedUrl = 'https://www.youtube.com/feeds/videos.xml';
 const openCodeEndpoint = 'https://opencode.ai/zen/go/v1/chat/completions';
-const openCodeModel = 'mimo-v2.5';
+const defaultOpenCodeModel = 'deepseek-v4-flash';
 const maxItems = 5;
 const maxTranscriptLength = 30000;
 
@@ -90,7 +90,7 @@ export const route: Route = {
             allowEmpty: true,
         };
     },
-    description: `YouTube 公式 RSS を元に、動画字幕を OpenCode Go の ${openCodeModel} で要約して配信します。字幕が取得できない動画は、動画説明文をそのまま配信します。要約結果は Redis にキャッシュされます。`,
+    description: `YouTube 公式 RSS を元に、動画字幕を OpenCode Go のモデル（OPENCODE_MODEL、既定 ${defaultOpenCodeModel}）で要約して配信します。字幕が取得できない動画は、動画説明文をそのまま配信します。要約結果は Redis にキャッシュされます。`,
 };
 
 async function fetchYouTubeFeed(channelId: string) {
@@ -484,7 +484,8 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
             'x-opencode-session': `rsshub:${videoId}`,
         },
         json: {
-            model: openCodeModel,
+            model: config.opencode.model || defaultOpenCodeModel,
+            reasoning_effort: 'none',
             messages: [
                 {
                     role: 'system',

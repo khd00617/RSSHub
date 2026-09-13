@@ -79,6 +79,7 @@ type ConfigEnvKeys =
     | 'OPENAI_PROMPT_TITLE'
     // OpenCode Go
     | 'OPENCODE_API_KEY'
+    | 'OPENCODE_MODEL'
     // Follow
     | 'FOLLOW_OWNER_USER_ID'
     | 'FOLLOW_DESCRIPTION'
@@ -353,6 +354,10 @@ export type Config = {
         inputOption: string;
         promptTitle: string;
         promptDescription: string;
+    };
+    opencode: {
+        apiKey?: string;
+        model: string;
     };
     follow: {
         ownerUserId?: string;
@@ -847,6 +852,10 @@ const calculateValue = () => {
         suffix: envs.SUFFIX,
         titleLengthLimit: toInt(envs.TITLE_LENGTH_LIMIT, 150),
         format: envs.FORMAT || 'rss',
+        opencode: {
+            apiKey: envs.OPENCODE_API_KEY,
+            model: envs.OPENCODE_MODEL || 'omen-alpha',
+        },
         openai: {
             apiKey: envs.OPENAI_API_KEY,
             model: envs.OPENAI_MODEL || 'gpt-3.5-turbo-16k',
