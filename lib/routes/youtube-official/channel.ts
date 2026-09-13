@@ -15,7 +15,7 @@ import { getDataByChannelId as getYoutubeDataByChannelId, getRecentDataByChannel
 const parser = new Parser();
 const youtubeFeedUrl = 'https://www.youtube.com/feeds/videos.xml';
 const openCodeEndpoint = 'https://opencode.ai/zen/go/v1/chat/completions';
-const openCodeModel = 'deepseek-v4-flash';
+const openCodeModel = 'mimo-v2.5';
 const maxItems = 5;
 const maxTranscriptLength = 30000;
 
@@ -146,24 +146,54 @@ async function resolveChannelId(channel: string): Promise<string> {
     return match[1] || match[2] || match[3];
 }
 
+type SummaryListItem = {
+    content: string;
+    children: SummaryListItem[];
+};
+
+function renderSummaryList(nodes: SummaryListItem[]): string {
+    const items = nodes.map((node) => {
+        const children = node.children.length > 0 ? renderSummaryList(node.children) : '';
+        return `<li>${node.content}${children}</li>`;
+    });
+    return `<ul>${items.join('')}</ul>`;
+}
+
 function formatSummary(summary: string): string {
     const formattedLines: string[] = [];
-    let listItems: string[] = [];
+    let rootItems: SummaryListItem[] = [];
+    let lastParent: SummaryListItem | undefined;
 
     const flushList = () => {
-        if (listItems.length === 0) {
+        if (rootItems.length === 0) {
             return;
         }
 
-        formattedLines.push(`<ul>${listItems.join('')}</ul>`);
-        listItems = [];
+        formattedLines.push(renderSummaryList(rootItems));
+        rootItems = [];
+        lastParent = undefined;
     };
 
     for (const line of summary.split(/\r?\n/)) {
-        const match = line.match(/^[ \t]*[-*][ \t](.*)$/);
+        const match = line.match(/^([ \t]*)[-*][ \t](.*)$/);
         if (match) {
-            listItems.push(`<li>${match[1]}</li>`);
-        } else {
+            // Normalize tabs to two spaces; every two spaces is one nesting level (max 2 levels).
+            const indent = match[1].replaceAll('\t', '  ');
+            const level = Math.min(1, Math.floor(indent.length / 2));
+            const content = match[2].trimStart();
+            if (level === 0) {
+                const node: SummaryListItem = { content, children: [] };
+                rootItems.push(node);
+                lastParent = node;
+            } else if (lastParent) {
+                lastParent.children.push({ content, children: [] });
+            } else {
+                // Child without a parent; downgrade to top level.
+                const node: SummaryListItem = { content, children: [] };
+                rootItems.push(node);
+                lastParent = node;
+            }
+        } else if (line.trim() !== '' || rootItems.length === 0) {
             flushList();
             formattedLines.push(line);
         }
@@ -386,7 +416,7 @@ async function createItem(item: VideoItem, apiKey: string) {
     if (videoId) {
         try {
             // summarizeVideo throws on failure so that failed results are never cached.
-            summary = await cache.tryGet(`youtube-opencode-summary:v5:${videoId}`, () => summarizeVideo(videoId, description, apiKey), 60 * 60 * 24 * 30, false);
+            summary = await cache.tryGet(`youtube-opencode-summary:v6:${videoId}`, () => summarizeVideo(videoId, description, apiKey), 60 * 60 * 24 * 30, false);
         } catch (error) {
             logger.warn(`Summary unavailable for YouTube video ${videoId}: ${error instanceof Error ? error.message : String(error)}`);
             summary = description;
@@ -462,11 +492,15 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
                         セクション名や前置き、免責は不要です。
                             【構成】
                             - リード文（動画の主題・テーマ・目的をまとめた導入文）
-                            - トピックセクション（タイムスタンプを活用し、主なトピック、必要に応じてサブトピックを箇条書き。）
+                            - トピックセクション（タイムスタンプを活用し、主なトピック、必要に応じてサブトピックを箇条書き。トピックが多い場合は意味の近い項目をグループ化し、親トピックと子項目の階層構造にする。）
                             - 締めくくり文
 
                             【注意事項】
                             - トピックセクション内の箇条書きの各項目は、必ず **先頭に「- 」（ハイフン＋スペース）** を付けて、各項目を **改行（\n）** で区切ってください。
+                            - 子項目は **行頭に半角スペース2つを付けた上で「- 」** を付けてください（例: 半角スペース2つ＋「- 子トピック」）。タブは使わないでください。
+                            - 階層は **最大2階層まで** とし、3階層目以降は作らないでください。
+                            - 番号付きリスト（1. など）や「+」、「•」は使わず、箇条書き記号は「- 」に統一してください。
+                            - 箇条書きの途中に空行を入れないでください。
                             - リード文とトピックセクションの間には **改行（\n）** を2行入れてください。
                             - トピックセクションと締めくくり文の間には **改行（\n）** を1行入れてください。
                             - 出力は要約のみとし、要約に内容に関係のない情報や、動画の説明文をそのまま出力することは避けてください。
