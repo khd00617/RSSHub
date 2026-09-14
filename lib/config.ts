@@ -854,7 +854,7 @@ const calculateValue = () => {
         format: envs.FORMAT || 'rss',
         opencode: {
             apiKey: envs.OPENCODE_API_KEY,
-            model: envs.OPENCODE_MODEL || 'omen-alpha',
+            model: envs.OPENCODE_MODEL || 'muse-spark-1.3-contributor',
         },
         openai: {
             apiKey: envs.OPENAI_API_KEY,

@@ -14,8 +14,13 @@ import { getDataByChannelId as getYoutubeDataByChannelId, getRecentDataByChannel
 
 const parser = new Parser();
 const youtubeFeedUrl = 'https://www.youtube.com/feeds/videos.xml';
-const openCodeEndpoint = 'https://opencode.ai/zen/go/v1/chat/completions';
-const defaultOpenCodeModel = 'deepseek-v4-flash';
+const openCodeChatEndpoint = 'https://opencode.ai/zen/go/v1/chat/completions';
+const openCodeResponsesEndpoint = 'https://opencode.ai/zen/go/v1/responses';
+const defaultOpenCodeModel = 'muse-spark-1.3-contributor';
+
+function isResponsesModel(model: string): boolean {
+    return model.startsWith('muse-spark-');
+}
 const maxItems = 5;
 const maxTranscriptLength = 30000;
 
@@ -474,22 +479,9 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
     // OpenCode Go rejects requests without a stable session ID (400 MissingSessionID)
     // and expects clients to identify themselves with a unique User-Agent.
     // See https://opencode.ai/docs/go/#where-can-i-use-it
-    const response = await got({
-        method: 'post',
-        url: openCodeEndpoint,
-        headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            'User-Agent': 'rsshub/1.0',
-            'x-opencode-session': `rsshub:${videoId}`,
-        },
-        json: {
-            model: config.opencode.model || defaultOpenCodeModel,
-            reasoning_effort: 'none',
-            messages: [
-                {
-                    role: 'system',
-                    content: `あなたは日本語の動画要約者です。入力された文字起こしを、以下の構成で日本語で要約してください。
+    // Muse Spark models use the Responses API (/v1/responses); others use Chat Completions.
+    const model = config.opencode.model || defaultOpenCodeModel;
+    const systemPrompt = `あなたは日本語の動画要約者です。入力された文字起こしを、以下の構成で日本語で要約してください。
                         セクション名や前置き、免責は不要です。
                             【構成】
                             - リード文（動画の主題・テーマ・目的をまとめた導入文）
@@ -512,23 +504,100 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
                             - 短く無駄のない、簡潔な表現を心がける。
                             - 基本的に文末は敬体にする。
                             - 読者は紹介文が動画の紹介であることを承知しています。「この動画は」や「本動画では」あるいは「～動画です。」などの"動画"を示す表現は省略する。
-                        `,
-                },
-                {
-                    role: 'user',
-                    content: `動画の文字起こし:\n\n${source}`,
-                },
-            ],
-            temperature: 0.2,
-        },
-        responseType: 'json',
-    });
-
-    const result = response.data as { choices?: Array<{ message?: { content?: string } }> };
-    const summary = result.choices?.[0]?.message?.content?.trim();
+                        `;
+    const userPrompt = `動画の文字起こし:\n\n${source}`;
+    const headers = {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'rsshub/1.0',
+        'x-opencode-session': `rsshub:${videoId}`,
+    };
+    let summary: string | undefined;
+    if (isResponsesModel(model)) {
+        const response = await got({
+            method: 'post',
+            url: openCodeResponsesEndpoint,
+            headers,
+            json: {
+                model,
+                instructions: systemPrompt,
+                input: userPrompt,
+                temperature: 0.2,
+                reasoning: { effort: 'minimal' },
+            },
+            responseType: 'json',
+        });
+        summary = extractResponsesText(response.data).trim();
+    } else {
+        const response = await got({
+            method: 'post',
+            url: openCodeChatEndpoint,
+            headers,
+            json: {
+                model,
+                reasoning_effort: 'none',
+                messages: [
+                    {
+                        role: 'system',
+                        content: systemPrompt,
+                    },
+                    {
+                        role: 'user',
+                        content: userPrompt,
+                    },
+                ],
+                temperature: 0.2,
+            },
+            responseType: 'json',
+        });
+        const result = response.data as { choices?: Array<{ message?: { content?: string } }> };
+        summary = result.choices?.[0]?.message?.content?.trim();
+    }
     if (!summary) {
         // Throw instead of returning the fallback so failures are never cached.
         throw new Error('OpenCode Go returned an empty summary.');
     }
     return summary;
+}
+
+type ResponsesOutputText = {
+    type?: string;
+    text?: string;
+};
+
+type ResponsesOutputContent = {
+    type?: string;
+    text?: string;
+    content?: ResponsesOutputText[];
+};
+
+type ResponsesOutputItem = {
+    type?: string;
+    content?: ResponsesOutputContent[];
+};
+
+function extractResponsesText(data: unknown): string {
+    const output = (data as { output?: ResponsesOutputItem[] })?.output;
+    if (!Array.isArray(output)) {
+        return '';
+    }
+    const texts: string[] = [];
+    for (const item of output) {
+        if (item?.type !== 'message' || !Array.isArray(item.content)) {
+            continue;
+        }
+        for (const content of item.content) {
+            if (content?.type === 'output_text' && typeof content.text === 'string') {
+                texts.push(content.text);
+            } else if (Array.isArray(content?.content)) {
+                const nestedContents = content.content ?? [];
+                for (const nested of nestedContents) {
+                    if (nested?.type === 'output_text' && typeof nested.text === 'string') {
+                        texts.push(nested.text);
+                    }
+                }
+            }
+        }
+    }
+    return texts.join('\n').trim();
 }
