@@ -14,9 +14,23 @@ import { getDataByChannelId as getYoutubeDataByChannelId, getRecentDataByChannel
 
 const parser = new Parser();
 const youtubeFeedUrl = 'https://www.youtube.com/feeds/videos.xml';
+const commandCodeChatEndpoint = 'https://api.commandcode.ai/provider/v1/chat/completions';
 const openCodeChatEndpoint = 'https://opencode.ai/zen/go/v1/chat/completions';
 const openCodeResponsesEndpoint = 'https://opencode.ai/zen/go/v1/responses';
+const defaultCommandCodeModel = 'deepseek/deepseek-v4.1-flash';
 const defaultOpenCodeModel = 'muse-spark-1.3-contributor';
+
+type SummaryProvider =
+    | {
+          kind: 'commandcode';
+          apiKey: string;
+          model: string;
+      }
+    | {
+          kind: 'opencode';
+          apiKey: string;
+          model: string;
+      };
 
 function isResponsesModel(model: string): boolean {
     return model.startsWith('muse-spark-');
@@ -32,8 +46,13 @@ export const route: Route = {
     features: {
         requireConfig: [
             {
+                name: 'COMMANDCODE_API_KEY',
+                description: 'CommandCode Provider API key for transcript summaries',
+            },
+            {
                 name: 'OPENCODE_API_KEY',
-                description: 'OpenCode Go API key for transcript summaries',
+                optional: true,
+                description: 'Legacy OpenCode Go API key for transcript summaries',
             },
         ],
         requirePuppeteer: false,
@@ -48,13 +67,10 @@ export const route: Route = {
             target: '/channel/:id',
         },
     ],
-    name: 'Channel with OpenCode Go summaries',
+    name: 'Channel with CommandCode summaries',
     maintainers: ['khd00617'],
     handler: async (ctx) => {
-        const apiKey = process.env.OPENCODE_API_KEY;
-        if (!apiKey) {
-            throw new ConfigNotFoundError('This route requires OPENCODE_API_KEY.');
-        }
+        const summaryProvider = getSummaryProvider();
 
         const rawChannel = ctx.req.param('id');
         if (!rawChannel) {
@@ -86,17 +102,35 @@ export const route: Route = {
             sourceItems = mergeVideoItems([...pageItems, ...searchItems, ...(data.item || [])]);
         }
 
-        const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, apiKey)));
+        const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, summaryProvider)));
 
         return {
-            title: `${title} - OpenCode Go summary`,
+            title: `${title} - ${summaryProvider.kind === 'commandcode' ? 'CommandCode' : 'OpenCode Go'} summary`,
             link,
             item: items,
             allowEmpty: true,
         };
     },
-    description: `YouTube 公式 RSS を元に、動画字幕を OpenCode Go のモデル（OPENCODE_MODEL、既定 ${defaultOpenCodeModel}）で要約して配信します。字幕が取得できない動画は、動画説明文をそのまま配信します。要約結果は Redis にキャッシュされます。`,
+    description: `YouTube 公式 RSS を元に、動画字幕を CommandCode Provider API のモデル（COMMANDCODE_MODEL、既定 ${defaultCommandCodeModel}）で要約して配信します。COMMANDCODE_API_KEY が未設定の場合は、旧来の OpenCode Go（OPENCODE_API_KEY）を使用します。字幕が取得できない動画は、動画説明文をそのまま配信します。要約結果は Redis にキャッシュされます。`,
 };
+
+function getSummaryProvider(): SummaryProvider {
+    if (config.commandcode.apiKey) {
+        return {
+            kind: 'commandcode',
+            apiKey: config.commandcode.apiKey,
+            model: config.commandcode.model,
+        };
+    }
+    if (config.opencode.apiKey) {
+        return {
+            kind: 'opencode',
+            apiKey: config.opencode.apiKey,
+            model: config.opencode.model || defaultOpenCodeModel,
+        };
+    }
+    throw new ConfigNotFoundError('This route requires COMMANDCODE_API_KEY or OPENCODE_API_KEY.');
+}
 
 async function fetchYouTubeFeed(channelId: string) {
     // The official Atom feed intermittently returns 404/500; retry a few times with
@@ -411,7 +445,7 @@ type VideoItem = {
     author?: string | Array<{ name: string; url?: string; avatar?: string }>;
 };
 
-async function createItem(item: VideoItem, apiKey: string) {
+async function createItem(item: VideoItem, provider: SummaryProvider) {
     const videoId = extractVideoId(item.link) || item.guid?.split(':').at(-1);
     const content = typeof item.content === 'string' ? item.content : item.content?.text || item.content?.html;
     // Keep the raw description (may be empty). The "could not summarize" message is
@@ -421,7 +455,7 @@ async function createItem(item: VideoItem, apiKey: string) {
     if (videoId) {
         try {
             // summarizeVideo throws on failure so that failed results are never cached.
-            summary = await cache.tryGet(`youtube-opencode-summary:v6:${videoId}`, () => summarizeVideo(videoId, description, apiKey), 60 * 60 * 24 * 30, false);
+            summary = await cache.tryGet(`youtube-opencode-summary:v6:${videoId}`, () => summarizeVideo(videoId, description, provider), 60 * 60 * 24 * 30, false);
         } catch (error) {
             logger.warn(`Summary unavailable for YouTube video ${videoId}: ${error instanceof Error ? error.message : String(error)}`);
             summary = description;
@@ -458,7 +492,7 @@ function extractVideoId(link?: string) {
     }
 }
 
-async function summarizeVideo(videoId: string, fallbackDescription: string, apiKey: string): Promise<string> {
+async function summarizeVideo(videoId: string, fallbackDescription: string, provider: SummaryProvider): Promise<string> {
     let subtitles = '';
     try {
         subtitles = await getSubtitlesByVideoId(videoId);
@@ -480,7 +514,7 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
     // and expects clients to identify themselves with a unique User-Agent.
     // See https://opencode.ai/docs/go/#where-can-i-use-it
     // Muse Spark models use the Responses API (/v1/responses); others use Chat Completions.
-    const model = config.opencode.model || defaultOpenCodeModel;
+    const model = provider.model;
     const systemPrompt = `あなたは日本語の動画要約者です。入力された文字起こしを、以下の構成で日本語で要約してください。
                         セクション名や前置き、免責は不要です。
                             【構成】
@@ -507,13 +541,16 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
                         `;
     const userPrompt = `動画の文字起こし:\n\n${source}`;
     const headers = {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${provider.apiKey}`,
         'Content-Type': 'application/json',
         'User-Agent': 'rsshub/1.0',
-        'x-opencode-session': `rsshub:${videoId}`,
+        ...(provider.kind === 'opencode' && { 'x-opencode-session': `rsshub:${videoId}` }),
     };
+    const systemPromptLength = systemPrompt.length;
+    const userPromptLength = userPrompt.length;
+    logger.info(`[youtube-official] LLM request provider=${provider.kind} model=${model} promptLength=${systemPromptLength + userPromptLength} chars (system=${systemPromptLength}, user=${userPromptLength})`);
     let summary: string | undefined;
-    if (isResponsesModel(model)) {
+    if (provider.kind === 'opencode' && isResponsesModel(model)) {
         const response = await got({
             method: 'post',
             url: openCodeResponsesEndpoint,
@@ -531,11 +568,11 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
     } else {
         const response = await got({
             method: 'post',
-            url: openCodeChatEndpoint,
+            url: provider.kind === 'commandcode' ? commandCodeChatEndpoint : openCodeChatEndpoint,
             headers,
             json: {
                 model,
-                reasoning_effort: 'none',
+                ...(provider.kind === 'opencode' && { reasoning_effort: 'none' }),
                 messages: [
                     {
                         role: 'system',
@@ -555,7 +592,7 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, apiK
     }
     if (!summary) {
         // Throw instead of returning the fallback so failures are never cached.
-        throw new Error('OpenCode Go returned an empty summary.');
+        throw new Error(`${provider.kind === 'commandcode' ? 'CommandCode' : 'OpenCode Go'} returned an empty summary.`);
     }
     return summary;
 }

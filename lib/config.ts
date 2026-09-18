@@ -80,6 +80,9 @@ type ConfigEnvKeys =
     // OpenCode Go
     | 'OPENCODE_API_KEY'
     | 'OPENCODE_MODEL'
+    // CommandCode
+    | 'COMMANDCODE_API_KEY'
+    | 'COMMANDCODE_MODEL'
     // Follow
     | 'FOLLOW_OWNER_USER_ID'
     | 'FOLLOW_DESCRIPTION'
@@ -356,6 +359,10 @@ export type Config = {
         promptDescription: string;
     };
     opencode: {
+        apiKey?: string;
+        model: string;
+    };
+    commandcode: {
         apiKey?: string;
         model: string;
     };
@@ -855,6 +862,10 @@ const calculateValue = () => {
         opencode: {
             apiKey: envs.OPENCODE_API_KEY,
             model: envs.OPENCODE_MODEL || 'muse-spark-1.3-contributor',
+        },
+        commandcode: {
+            apiKey: envs.COMMANDCODE_API_KEY,
+            model: envs.COMMANDCODE_MODEL || 'deepseek/deepseek-v4.1-flash',
         },
         openai: {
             apiKey: envs.OPENAI_API_KEY,

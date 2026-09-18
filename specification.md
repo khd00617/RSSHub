@@ -6,12 +6,12 @@
 
 ### プロジェクト情報
 
-| 項目       | 内容                                                                  |
-| ---------- | --------------------------------------------------------------------- |
-| ベース     | [RSSHub](https://github.com/DIYgod/RSSHub)                            |
-| デプロイ先 | Fly.io（アプリ名: `rsshub-khd00617`）                                 |
-| 公開URL    | <https://rsshub-khd00617.fly.dev/>                                    |
-| 主要ルート | `/youtube-official/channel/:id` — YouTube 最新動画 + OpenCode Go 要約 |
+| 項目       | 内容                                                                           |
+| ---------- | ------------------------------------------------------------------------------ |
+| ベース     | [RSSHub](https://github.com/DIYgod/RSSHub)                                     |
+| デプロイ先 | Fly.io（アプリ名: `rsshub-khd00617`）                                          |
+| 公開URL    | <https://rsshub-khd00617.fly.dev/>                                             |
+| 主要ルート | `/youtube-official/channel/:id` — YouTube 最新動画 + CommandCode/OpenCode 要約 |
 
 ---
 
@@ -19,21 +19,21 @@
 
 ### 主要ファイル
 
-| ファイル/ディレクトリ                | 説明                                                 |
-| ------------------------------------ | ---------------------------------------------------- |
-| `fly.toml`                           | Fly.io アプリ設定（ポート 1200、ヘルスチェックなど） |
-| `Dockerfile`                         | マルチステージビルドの Dockerfile                    |
-| `lib/config.ts`                      | 環境変数定義（`OPENCODE_API_KEY` を含む）            |
-| `lib/middleware/cache.ts`            | 通常ルートと `/fulltext` のレスポンスキャッシュ      |
-| `lib/utils/fulltext.ts`              | RSS記事の全文取得、文字コード復号、複数ページ結合    |
-| `lib/utils/fulltext.test.ts`         | 全文取得と文字コード処理のテスト                     |
-| `lib/routes/youtube-official/`       | YouTube 最新動画 + OpenCode Go 要約ルート            |
-| `docs/youtube-latest-videos.md`      | 最新動画取得(公式 RSS / フォールバック)の知見        |
-| `lib/routes/youtube/api/youtubei.ts` | YouTube 内部 API と検索による取得処理                |
-| `lib/routes/cruise-mag/`             | クルーズマガジンニュースルート                       |
-| `.dockerignore`                      | Docker ビルドコンテキストから不要ファイルを除外      |
-| `package.json`                       | ビルドスクリプト、依存関係                           |
-| `scripts/docker/`                    | Docker イメージ最適化スクリプト                      |
+| ファイル/ディレクトリ                | 説明                                                              |
+| ------------------------------------ | ----------------------------------------------------------------- |
+| `fly.toml`                           | Fly.io アプリ設定（ポート 1200、ヘルスチェックなど）              |
+| `Dockerfile`                         | マルチステージビルドの Dockerfile                                 |
+| `lib/config.ts`                      | 環境変数定義（`COMMANDCODE_API_KEY` / `OPENCODE_API_KEY` を含む） |
+| `lib/middleware/cache.ts`            | 通常ルートと `/fulltext` のレスポンスキャッシュ                   |
+| `lib/utils/fulltext.ts`              | RSS記事の全文取得、文字コード復号、複数ページ結合                 |
+| `lib/utils/fulltext.test.ts`         | 全文取得と文字コード処理のテスト                                  |
+| `lib/routes/youtube-official/`       | YouTube 最新動画 + CommandCode/OpenCode 要約ルート                |
+| `docs/youtube-latest-videos.md`      | 最新動画取得(公式 RSS / フォールバック)の知見                     |
+| `lib/routes/youtube/api/youtubei.ts` | YouTube 内部 API と検索による取得処理                             |
+| `lib/routes/cruise-mag/`             | クルーズマガジンニュースルート                                    |
+| `.dockerignore`                      | Docker ビルドコンテキストから不要ファイルを除外                   |
+| `package.json`                       | ビルドスクリプト、依存関係                                        |
+| `scripts/docker/`                    | Docker イメージ最適化スクリプト                                   |
 
 ### カスタムルート一覧
 
@@ -90,9 +90,12 @@ flowchart LR
     H --> J[各動画の字幕を取得]
     I --> J
     J --> K{字幕あり?}
-    K -->|Yes| L[OpenCode Go API<br/>で日本語要約]
+    K -->|Yes| P{COMMANDCODE_API_KEY?}
+    P -->|Yes| L[CommandCode Provider API<br/>DeepSeek V4.1 Flash で日本語要約]
+    P -->|No| L2[OpenCode Go API<br/>で日本語要約]
     K -->|No| M[動画説明文を<br/>そのまま使用]
     L --> N[Redis にキャッシュ]
+    L2 --> N
     M --> N
     N --> O[RSS 出力]
 ```
@@ -104,16 +107,18 @@ flowchart LR
 - **複数フォールバック**: 公式 RSS が `404` または `5xx` の場合(3 回リトライ後)は、`youtubei.js`(動画タブ + ライブ配信タブ)、チャンネルホーム、`/videos` ページ、直近1か月を対象にした YouTube 検索から取得
 - **最新動画の選択**: 各取得元の動画をチャンネル ID で確認し、動画 ID で重複除去した後、公開日時の新しい順に並べて最大5件を出力
 - **字幕取得**: `getSubtitlesByVideoId()` で字幕を取得し、タイムスタンプ行を除去
-- **AI 要約**: 字幕を OpenCode Go API (`deepseek-v4-flash`) に送信し、日本語要約を生成
-- **キャッシュ**: ルートレスポンスは `youtube-official-v3` 世代、要約結果は `youtube-opencode-summary:v5:{videoId}` としてキャッシュ（要約の有効期限は30日）。要約生成に失敗した場合はキャッシュせずフォールバックを使用
+- **AI 要約**: 字幕を CommandCode Provider API のモデル（`COMMANDCODE_MODEL`、既定値 `deepseek/deepseek-v4.1-flash`）に送信し、日本語要約を生成。`COMMANDCODE_API_KEY` がない場合は `OPENCODE_API_KEY` の OpenCode Go にフォールバック
+- **キャッシュ**: ルートレスポンスは `youtube-official-v3` 世代、要約結果は既存の `youtube-opencode-summary:v6:{videoId}` としてキャッシュ（要約の有効期限は30日）。CommandCode 対応では要約キャッシュキーを変更せず、旧要約を引き継ぐ。要約生成に失敗した場合はキャッシュせずフォールバックを使用
 - **埋め込みプレイヤー**: RSS の `description` 先頭に YouTube 埋め込みプレイヤー (`<iframe>`) を挿入
 - **エラーハンドリング**: 字幕取得失敗時は動画説明文をフォールバックとして使用
 
 ### 依存環境変数
 
-| 変数名             | 必須 | 説明                 |
-| ------------------ | ---- | -------------------- |
-| `OPENCODE_API_KEY` | ✅   | OpenCode Go API キー |
+| 変数名                | 必須 | デフォルト                     | 説明                          |
+| --------------------- | ---- | ------------------------------ | ----------------------------- |
+| `COMMANDCODE_API_KEY` | ✅   | —                              | CommandCode Provider API キー |
+| `COMMANDCODE_MODEL`   |      | `deepseek/deepseek-v4.1-flash` | CommandCode で使用するモデル  |
+| `OPENCODE_API_KEY`    |      | —                              | 旧互換用 OpenCode Go API キー |
 
 ローカルではプロジェクト直下の `.env` に設定します。Fly.io では `.env` をデプロイせず、Secret として設定します。
 
@@ -172,25 +177,29 @@ RSSフィード自体がUTF-8でも、リンク先の記事ページは記事カ
 | `/youtube-official` のルートレスポンス | `youtube-official-v3`         | `lib/middleware/cache.ts`                |
 | 記事ページの解析結果                   | `mercury-cache-page-v4`       | `lib/utils/fulltext.ts`                  |
 | 記事ごとの全文結果                     | `mercury-cache-fulltext-v4`   | `lib/utils/fulltext.ts`                  |
-| YouTube 要約結果                       | `youtube-opencode-summary:v5` | `lib/routes/youtube-official/channel.ts` |
+| YouTube 要約結果                       | `youtube-opencode-summary:v6` | `lib/routes/youtube-official/channel.ts` |
 
 キャッシュを更新せずにデプロイすると、修正済みコードでも過去の文字化け結果が返ることがあります。全文取得の解析方法を変更した場合は、外側のルートキャッシュと内側の全文キャッシュを同時に更新してください。
-YouTube の取得元や最新動画の選定方法を変更した場合も、`youtube-official` のキャッシュ世代を更新してください。
+YouTube の取得元や最新動画の選定方法を変更した場合も、`youtube-official` のキャッシュ世代を更新してください。LLM provider の切り替えだけでは、既存の要約を引き継ぐためキャッシュ世代を更新しません。
 
 ---
 
 ## 環境変数
 
-| 変数名             | 必須 | デフォルト | 説明                                              |
-| ------------------ | ---- | ---------- | ------------------------------------------------- |
-| `OPENCODE_API_KEY` | ✅   | —          | OpenCode Go API キー                              |
-| `CACHE_TYPE`       |      | `memory`   | キャッシュ方式。本番では `redis` 推奨             |
-| `REDIS_URL`        |      | —          | Redis 接続文字列（`CACHE_TYPE=redis` の場合必須） |
-| `PORT`             |      | `1200`     | 内部ポート                                        |
+| 変数名                | 必須 | デフォルト | 説明                                              |
+| --------------------- | ---- | ---------- | ------------------------------------------------- |
+| `COMMANDCODE_API_KEY` | ✅   | —          | CommandCode Provider API キー                     |
+| `OPENCODE_API_KEY`    |      | —          | 旧互換用 OpenCode Go API キー                     |
+| `CACHE_TYPE`          |      | `memory`   | キャッシュ方式。本番では `redis` 推奨             |
+| `REDIS_URL`           |      | —          | Redis 接続文字列（`CACHE_TYPE=redis` の場合必須） |
+| `PORT`                |      | `1200`     | 内部ポート                                        |
 
 ローカル開発では、プロジェクト直下の `.env` に秘密値を設定します。`.env` は Git にコミットしません。
 
 ```env
+COMMANDCODE_API_KEY=<CommandCode API key>
+COMMANDCODE_MODEL=deepseek/deepseek-v4.1-flash
+# Optional legacy fallback
 OPENCODE_API_KEY=<OpenCode Go API key>
 ```
 
