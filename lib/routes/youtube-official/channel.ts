@@ -447,6 +447,7 @@ type VideoItem = {
 
 async function createItem(item: VideoItem, provider: SummaryProvider) {
     const videoId = extractVideoId(item.link) || item.guid?.split(':').at(-1);
+    const guid = videoId ? `https://www.youtube.com/watch?v=${videoId}` : item.guid;
     const content = typeof item.content === 'string' ? item.content : item.content?.text || item.content?.html;
     // Keep the raw description (may be empty). The "could not summarize" message is
     // display-only and must never be sent to the AI or written into the cache.
@@ -474,7 +475,7 @@ async function createItem(item: VideoItem, provider: SummaryProvider) {
         description: `${embedHtml}${formattedSummary}`,
         // Guard against Invalid Date objects from unparseable relative dates.
         pubDate: item.pubDate && !Number.isNaN(new Date(item.pubDate).getTime()) ? parseDate(item.pubDate) : undefined,
-        guid: item.guid,
+        guid,
         author: item.creator || item.author,
     };
 }
