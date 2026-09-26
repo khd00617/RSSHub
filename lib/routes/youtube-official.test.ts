@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Data } from '@/types';
 
-import { route } from './channel';
+import { route } from './youtube-official/channel';
 
 const mocks = vi.hoisted(() => ({
     cacheTryGet: vi.fn(),
@@ -31,8 +31,8 @@ vi.mock('rss-parser', () => ({
         }
     },
 }));
-vi.mock('../youtube/api/subtitles', () => ({ getSubtitlesByVideoId: vi.fn() }));
-vi.mock('../youtube/api/youtubei', () => ({
+vi.mock('./youtube/api/subtitles', () => ({ getSubtitlesByVideoId: vi.fn() }));
+vi.mock('./youtube/api/youtubei', () => ({
     getDataByChannelId: mocks.getDataByChannelId,
     getRecentDataByChannelId: mocks.getRecentDataByChannelId,
 }));
