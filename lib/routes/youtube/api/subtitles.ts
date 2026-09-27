@@ -37,14 +37,14 @@ ${seg.text}
 
 export const getSubtitlesByVideoId = (videoId: string) =>
     cache.tryGet(`youtube:getSubtitlesByVideoId:${videoId}`, async () => {
-        try {
-            const subtitles = await getSubtitles({ videoID: videoId });
-            const srt = convertToSrt(subtitles);
-            return srt;
-        } catch {
-            // Return empty string if subtitles are not available
-            return '';
+        const subtitles = await getSubtitles({ videoID: videoId });
+        const srt = convertToSrt(subtitles);
+        if (!srt.trim()) {
+            // Throw instead of caching an empty result so a later retry can
+            // succeed once subtitles become available.
+            throw new Error(`No subtitles available for ${videoId}.`);
         }
+        return srt;
     });
 
 const createSubtitleDataUrl = (srt: string): string => `data:text/plain;charset=utf-8,${encodeURIComponent(srt)}`;
@@ -77,8 +77,14 @@ export const getSrtAttachmentBatch = async (videoIds: string[]) => {
     const results = await pMap(
         videoIds,
         async (videoId) => {
-            const srt = await getSubtitlesByVideoId(videoId);
-            return { videoId, srt: createSrtAttachmentFromSrt(srt) };
+            try {
+                const srt = await getSubtitlesByVideoId(videoId);
+                return { videoId, srt: createSrtAttachmentFromSrt(srt) };
+            } catch {
+                // Subtitles unavailable; leave this video without an attachment
+                // instead of failing the whole batch.
+                return { videoId, srt: [] };
+            }
         },
         { concurrency: 5 }
     );

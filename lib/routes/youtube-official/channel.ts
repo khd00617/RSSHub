@@ -35,6 +35,17 @@ type SummaryProvider =
 function isResponsesModel(model: string): boolean {
     return model.startsWith('muse-spark-');
 }
+
+// A cached empty subtitle ('""') or whitespace/quotes-only input must not be
+// sent to the LLM. Treat content without any letter or number as empty.
+function isEffectivelyEmpty(source: string): boolean {
+    return !/[\p{L}\p{N}]/u.test(source);
+}
+
+// Detect LLM refusals caused by empty input so they are never cached as summaries.
+function isEmptyTranscriptRefusal(summary: string): boolean {
+    return summary.includes('文字起こしが空') || summary.includes('文字起こしデータの提供が必要') || summary.includes('文字起こしを入力してください') || /transcript.*empty/i.test(summary);
+}
 const maxItems = 5;
 const maxTranscriptLength = 30000;
 
@@ -504,9 +515,9 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, prov
         .replaceAll(/\d+\n\d{2}:\d{2}:\d{2},\d{3} --> .*\n/g, '')
         .trim()
         .slice(0, maxTranscriptLength);
-    const source = transcript || fallbackDescription;
+    const source = (transcript || fallbackDescription || '').trim();
 
-    if (!source) {
+    if (!source || isEffectivelyEmpty(source)) {
         // Nothing to summarize. Throw so the empty result is not cached for 30 days.
         throw new Error('No transcript or description available to summarize.');
     }
@@ -594,6 +605,11 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, prov
     if (!summary) {
         // Throw instead of returning the fallback so failures are never cached.
         throw new Error(`${provider.kind === 'commandcode' ? 'CommandCode' : 'OpenCode Go'} returned an empty summary.`);
+    }
+    if (isEmptyTranscriptRefusal(summary)) {
+        // The LLM refused because the input was effectively empty. Throw so this
+        // refusal is never cached as a summary for 30 days.
+        throw new Error('LLM refused to summarize: transcript was effectively empty.');
     }
     return summary;
 }

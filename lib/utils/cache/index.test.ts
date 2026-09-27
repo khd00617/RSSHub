@@ -60,6 +60,20 @@ describe('cache', () => {
         expect(fetcher).toHaveBeenCalledTimes(1);
     });
 
+    it('tryGet unwraps cached empty strings', async () => {
+        process.env.CACHE_TYPE = 'memory';
+        const cache = (await import('@/utils/cache')).default;
+        if (!cache.clients.memoryCache || !cache.status.available) {
+            throw new Error('Memory cache client error');
+        }
+
+        const fetcher = vi.fn(() => Promise.resolve('fresh'));
+        await cache.set('empty-string', JSON.stringify(''));
+
+        expect(await cache.tryGet('empty-string', fetcher)).toBe('');
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+
     it('redis', async () => {
         process.env.CACHE_TYPE = 'redis';
         const cache = (await import('@/utils/cache')).default;

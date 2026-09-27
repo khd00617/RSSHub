@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     cacheTryGet: vi.fn(),
     getDataByChannelId: vi.fn(),
     getRecentDataByChannelId: vi.fn(),
+    getSubtitlesByVideoId: vi.fn(),
     got: vi.fn(),
     parseString: vi.fn(),
 }));
@@ -31,7 +32,7 @@ vi.mock('rss-parser', () => ({
         }
     },
 }));
-vi.mock('./youtube/api/subtitles', () => ({ getSubtitlesByVideoId: vi.fn() }));
+vi.mock('./youtube/api/subtitles', () => ({ getSubtitlesByVideoId: mocks.getSubtitlesByVideoId }));
 vi.mock('./youtube/api/youtubei', () => ({
     getDataByChannelId: mocks.getDataByChannelId,
     getRecentDataByChannelId: mocks.getRecentDataByChannelId,
@@ -76,5 +77,54 @@ describe('youtube-official channel route', () => {
 
         expect(officialResult.item?.[0].guid).toBe(expectedGuid);
         expect(fallbackResult.item?.[0].guid).toBe(expectedGuid);
+    });
+
+    it('does not send quote-only cached subtitles to the LLM', async () => {
+        const channelId = 'UC1234567890123456789012';
+        const videoId = 'abc123def45';
+        const link = `https://www.youtube.com/watch?v=${videoId}`;
+        const context = { req: { param: () => channelId } };
+
+        // Historical cache payload for a missing transcript: JSON '""'.
+        mocks.getSubtitlesByVideoId.mockResolvedValue('""');
+        mocks.got.mockResolvedValue({ body: '<feed />' });
+        mocks.parseString.mockResolvedValue({
+            title: 'Example channel',
+            link: `https://www.youtube.com/channel/${channelId}`,
+            items: [{ title: 'Example video', link, guid: link }],
+        });
+        // Pass through to the real summarize function so its guard runs.
+        mocks.cacheTryGet.mockImplementation((_key: string, getValue: () => Promise<string>) => getValue());
+
+        const result = (await route.handler(context as never)) as Data;
+
+        expect(mocks.got).not.toHaveBeenCalledWith(expect.objectContaining({ method: 'post' }));
+        expect(result.item?.[0].description).toContain('要約を取得できませんでした');
+    });
+
+    it('does not cache LLM empty-transcript refusals', async () => {
+        const channelId = 'UC1234567890123456789012';
+        const videoId = 'abc123def45';
+        const link = `https://www.youtube.com/watch?v=${videoId}`;
+        const context = { req: { param: () => channelId } };
+
+        vi.mocked(mocks.getSubtitlesByVideoId).mockResolvedValue('1\n00:00:00,000 --> 00:00:01,000\nこんにちは\n');
+        mocks.got.mockResolvedValue({ body: '<feed />' });
+        mocks.parseString.mockResolvedValue({
+            title: 'Example channel',
+            link: `https://www.youtube.com/channel/${channelId}`,
+            items: [{ title: 'Example video', link, guid: link }],
+        });
+        mocks.cacheTryGet.mockImplementation((_key: string, getValue: () => Promise<string>) => getValue());
+        mocks.got.mockImplementation((options: { method?: string }) => {
+            if (options.method === 'post') {
+                return { data: { choices: [{ message: { content: '入力された文字起こしが空のため、要約は作成できません。' } }] } };
+            }
+            return { body: '<feed />' };
+        });
+
+        const result = (await route.handler(context as never)) as Data;
+
+        expect(result.item?.[0].description).toContain('要約を取得できませんでした');
     });
 });

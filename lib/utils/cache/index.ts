@@ -164,14 +164,17 @@ export default {
         }
         let v = await cacheModule.get(key, refresh);
         if (v) {
-            let parsed;
+            let parsed: unknown;
             try {
                 parsed = JSON.parse(v);
             } catch {
                 parsed = null;
             }
-            if (parsed) {
-                v = parsed;
+            // Unwrap JSON payloads, including an empty-string payload ('""').
+            // Without the explicit '' check, a cached empty string leaks through
+            // as the truthy 2-character string '""'.
+            if (parsed || parsed === '') {
+                v = parsed as string;
             }
 
             return v as T;
