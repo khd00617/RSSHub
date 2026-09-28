@@ -48,6 +48,13 @@ function isEmptyTranscriptRefusal(summary: string): boolean {
 }
 const maxItems = 5;
 const maxTranscriptLength = 30000;
+const subtitleRetryDelayMs = 24 * 60 * 60 * 1000;
+const subtitleStateTtlSeconds = 60 * 60 * 24 * 365 * 10;
+
+type SubtitleState = {
+    firstSeenAt: number;
+    status: 'pending' | 'available' | 'unavailable';
+};
 
 export const route: Route = {
     path: '/channel/:id',
@@ -81,14 +88,22 @@ export const route: Route = {
     name: 'Channel with CommandCode summaries',
     maintainers: ['khd00617'],
     handler: async (ctx) => {
-        const summaryProvider = getSummaryProvider();
-
         const rawChannel = ctx.req.param('id');
+        const requestStartedAt = Date.now();
+        logger.info(`[youtube-official] request started channelParam=${encodeURIComponent(rawChannel || '')}`);
+        const summaryProvider = getSummaryProvider();
         if (!rawChannel) {
             throw new ConfigNotFoundError('A YouTube channel ID or handle is required.');
         }
         const channel = decodeURIComponent(rawChannel);
-        const channelId = await resolveChannelId(channel);
+        let channelId: string;
+        try {
+            channelId = await resolveChannelId(channel);
+        } catch (error) {
+            logger.warn(`[youtube-official] channel resolution failed channelParam=${encodeURIComponent(channel)} error=${error instanceof Error ? error.message : String(error)}`);
+            throw error;
+        }
+        logger.info(`[youtube-official] channel resolved channelId=${channelId} provider=${summaryProvider.kind} model=${summaryProvider.model}`);
 
         let title = 'YouTube channel';
         let link = `https://www.youtube.com/channel/${channelId}`;
@@ -98,6 +113,7 @@ export const route: Route = {
             title = feed.title || title;
             link = feed.link || link;
             sourceItems = feed.items;
+            logger.info(`[youtube-official] video source=official-rss channelId=${channelId} items=${sourceItems.length}`);
         } else {
             logger.warn(`YouTube RSS unavailable for ${channelId} after retries, falling back to youtubei.js`);
             const data = await getYoutubeDataByChannelId({ channelId, embed: false, filterShorts: false, isJsonFeed: false, includeLive: true });
@@ -111,9 +127,13 @@ export const route: Route = {
                 logger.warn(`YouTube search unavailable for ${channelId}: ${error instanceof Error ? error.message : String(error)}`);
             }
             sourceItems = mergeVideoItems([...pageItems, ...searchItems, ...(data.item || [])]);
+            logger.info(`[youtube-official] video source=fallback channelId=${channelId} pageItems=${pageItems.length} searchItems=${searchItems.length} apiItems=${data.item?.length ?? 0} mergedItems=${sourceItems.length}`);
         }
 
-        const items = await Promise.all(sourceItems.slice(0, maxItems).map((item) => createItem(item, summaryProvider)));
+        const candidates = sourceItems.slice(0, maxItems);
+        logger.info(`[youtube-official] video processing started channelId=${channelId} sourceItems=${sourceItems.length} candidates=${candidates.length}`);
+        const items = (await Promise.all(candidates.map((item) => createItem(item, summaryProvider)))).filter((item) => item !== undefined);
+        logger.info(`[youtube-official] request completed channelId=${channelId} candidates=${candidates.length} included=${items.length} omitted=${candidates.length - items.length} elapsedMs=${Date.now() - requestStartedAt}`);
 
         return {
             title: `${title} - ${summaryProvider.kind === 'commandcode' ? 'CommandCode' : 'OpenCode Go'} summary`,
@@ -122,7 +142,7 @@ export const route: Route = {
             allowEmpty: true,
         };
     },
-    description: `YouTube 公式 RSS を元に、動画字幕を CommandCode Provider API のモデル（COMMANDCODE_MODEL、既定 ${defaultCommandCodeModel}）で要約して配信します。COMMANDCODE_API_KEY が未設定の場合は、旧来の OpenCode Go（OPENCODE_API_KEY）を使用します。字幕が取得できない動画は、動画説明文をそのまま配信します。要約結果は Redis にキャッシュされます。`,
+    description: `YouTube 公式 RSS を元に、動画字幕を CommandCode Provider API のモデル（COMMANDCODE_MODEL、既定 ${defaultCommandCodeModel}）で要約して配信します。COMMANDCODE_API_KEY が未設定の場合は、旧来の OpenCode Go（OPENCODE_API_KEY）を使用します。字幕取得に失敗した動画は発見から24時間は除外し、24時間後の再試行にも失敗した場合は「字幕を取得できませんでした」として配信します。要約結果は Redis にキャッシュされます。`,
 };
 
 function getSummaryProvider(): SummaryProvider {
@@ -148,6 +168,7 @@ async function fetchYouTubeFeed(channelId: string) {
     // short delays before falling back to the slower youtubei.js/page sources.
     const url = `${youtubeFeedUrl}?channel_id=${encodeURIComponent(channelId)}`;
     for (let attempt = 1; attempt <= 3; attempt++) {
+        const attemptStartedAt = Date.now();
         try {
             // Sequential retries are intentional; each attempt must finish before the next.
             // eslint-disable-next-line no-await-in-loop
@@ -161,9 +182,11 @@ async function fetchYouTubeFeed(channelId: string) {
                 responseType: 'text',
             });
             // eslint-disable-next-line no-await-in-loop
-            return await parser.parseString(response.body);
+            const feed = await parser.parseString(response.body);
+            logger.info(`[youtube-official] official feed fetched channelId=${channelId} attempt=${attempt} items=${feed.items.length} elapsedMs=${Date.now() - attemptStartedAt}`);
+            return feed;
         } catch (error) {
-            logger.warn(`YouTube RSS attempt ${attempt}/3 failed for ${channelId}: ${error instanceof Error ? error.message : String(error)}`);
+            logger.warn(`[youtube-official] official feed attempt=${attempt}/3 failed channelId=${channelId} elapsedMs=${Date.now() - attemptStartedAt} error=${error instanceof Error ? error.message : String(error)}`);
             if (attempt < 3) {
                 // eslint-disable-next-line no-await-in-loop
                 await wait(1500);
@@ -456,39 +479,120 @@ type VideoItem = {
     author?: string | Array<{ name: string; url?: string; avatar?: string }>;
 };
 
+async function getSubtitleState(trackingId: string): Promise<{ cacheKey: string; isNew: boolean; state: SubtitleState }> {
+    const cacheKey = `youtube-official:subtitle-state:v1:${trackingId}`;
+    const cachedState = await cache.get(cacheKey, false);
+    if (cachedState) {
+        let state: Partial<SubtitleState> | undefined;
+        try {
+            state = JSON.parse(cachedState) as Partial<SubtitleState>;
+        } catch {
+            state = undefined;
+        }
+        if (state && typeof state.firstSeenAt === 'number' && Number.isFinite(state.firstSeenAt) && ['pending', 'available', 'unavailable'].includes(state.status ?? '')) {
+            return { cacheKey, isNew: false, state: state as SubtitleState };
+        }
+    }
+
+    const state: SubtitleState = { firstSeenAt: Date.now(), status: 'pending' };
+    await cache.set(cacheKey, state, subtitleStateTtlSeconds);
+    return { cacheKey, isNew: true, state };
+}
+
+function extractTranscript(subtitles: string): string {
+    return subtitles
+        .replaceAll(/\d+\n\d{2}:\d{2}:\d{2},\d{3} --> .*\n/g, '')
+        .trim()
+        .slice(0, maxTranscriptLength);
+}
+
 async function createItem(item: VideoItem, provider: SummaryProvider) {
     const videoId = extractVideoId(item.link) || item.guid?.split(':').at(-1);
     const guid = videoId ? `https://www.youtube.com/watch?v=${videoId}` : item.guid;
     const content = typeof item.content === 'string' ? item.content : item.content?.text || item.content?.html;
-    // Keep the raw description (may be empty). The "could not summarize" message is
-    // display-only and must never be sent to the AI or written into the cache.
     const description = item.contentSnippet || content || item.description || '';
+    const embedHtml = videoId
+        ? `<iframe width="560" height="315" src="https://www.youtube.com/embed/${videoId}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe><br><br>`
+        : '';
+    const createFeedItem = (summary: string) => ({
+        title: item.title ?? 'YouTube video',
+        link: item.link,
+        description: `${embedHtml}${formatSummary(summary)}`,
+        pubDate: item.pubDate && !Number.isNaN(new Date(item.pubDate).getTime()) ? parseDate(item.pubDate) : undefined,
+        guid,
+        author: item.creator || item.author,
+    });
+    const trackingId = videoId || item.guid || item.link;
+    if (!trackingId) {
+        return;
+    }
+
+    const { cacheKey, isNew, state } = await getSubtitleState(trackingId);
+    if (isNew) {
+        logger.info(`[youtube-official] subtitle state created video=${trackingId} firstSeenAt=${new Date(state.firstSeenAt).toISOString()}`);
+    } else {
+        logger.debug(`[youtube-official] subtitle state loaded video=${trackingId} status=${state.status} firstSeenAt=${new Date(state.firstSeenAt).toISOString()}`);
+    }
+    if (state.status === 'unavailable') {
+        logger.debug(`[youtube-official] subtitle retry skipped video=${trackingId} reason=final-failure`);
+        return createFeedItem('字幕を取得できませんでした');
+    }
+
+    let subtitles: string | undefined;
+    if (state.status === 'pending') {
+        const isFinalRetry = !isNew && Date.now() - state.firstSeenAt >= subtitleRetryDelayMs;
+        if (!isNew && !isFinalRetry) {
+            logger.debug(`[youtube-official] subtitle retry deferred video=${trackingId} retryAt=${new Date(state.firstSeenAt + subtitleRetryDelayMs).toISOString()}`);
+            return;
+        }
+
+        const subtitleAttemptStartedAt = Date.now();
+        const subtitleAttempt = isFinalRetry ? 'final-retry' : 'initial';
+        logger.info(`[youtube-official] subtitle retrieval started video=${trackingId} attempt=${subtitleAttempt}`);
+        let subtitleError = 'No transcript returned.';
+        try {
+            subtitles = videoId ? await getSubtitlesByVideoId(videoId) : '';
+            const transcript = extractTranscript(subtitles);
+            if (isEffectivelyEmpty(transcript)) {
+                subtitles = '';
+                subtitleError = 'Subtitle response contained no transcript text.';
+            } else {
+                state.status = 'available';
+                await cache.set(cacheKey, state, subtitleStateTtlSeconds);
+                logger.info(`[youtube-official] subtitle retrieval succeeded video=${trackingId} attempt=${subtitleAttempt} transcriptChars=${transcript.length} elapsedMs=${Date.now() - subtitleAttemptStartedAt}`);
+            }
+        } catch (error) {
+            subtitleError = error instanceof Error ? error.message : String(error);
+        }
+
+        if (state.status !== 'available') {
+            logger.warn(`[youtube-official] subtitle retrieval failed video=${trackingId} attempt=${subtitleAttempt} elapsedMs=${Date.now() - subtitleAttemptStartedAt} error=${subtitleError}`);
+            if (isFinalRetry) {
+                state.status = 'unavailable';
+                await cache.set(cacheKey, state, subtitleStateTtlSeconds);
+                logger.info(`[youtube-official] subtitle state finalized video=${trackingId} status=unavailable`);
+                return createFeedItem('字幕を取得できませんでした');
+            }
+            return;
+        }
+    }
+
     let summary = description;
     if (videoId) {
+        const summaryStartedAt = Date.now();
+        logger.info(`[youtube-official] summary started video=${videoId} provider=${provider.kind} model=${provider.model}`);
         try {
-            // summarizeVideo throws on failure so that failed results are never cached.
-            summary = await cache.tryGet(`youtube-opencode-summary:v6:${videoId}`, () => summarizeVideo(videoId, description, provider), 60 * 60 * 24 * 30, false);
+            summary = await cache.tryGet(`youtube-opencode-summary:v7:${videoId}`, () => summarizeVideo(videoId, description, provider, subtitles), 60 * 60 * 24 * 30, false);
+            logger.info(`[youtube-official] summary ready video=${videoId} chars=${summary.length} elapsedMs=${Date.now() - summaryStartedAt}`);
         } catch (error) {
-            logger.warn(`Summary unavailable for YouTube video ${videoId}: ${error instanceof Error ? error.message : String(error)}`);
+            logger.warn(
+                `[youtube-official] summary failed video=${videoId} provider=${provider.kind} model=${provider.model} elapsedMs=${Date.now() - summaryStartedAt} error=${error instanceof Error ? error.message : String(error)}`
+            );
             summary = description;
         }
     }
 
-    const embedHtml = videoId
-        ? `<iframe width="560" height="315" src="https://www.youtube.com/embed/${videoId}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe><br><br>`
-        : '';
-
-    const formattedSummary = formatSummary(summary || description || `「${item.title || '動画'}」の要約を取得できませんでした。`);
-
-    return {
-        title: item.title ?? 'YouTube video',
-        link: item.link,
-        description: `${embedHtml}${formattedSummary}`,
-        // Guard against Invalid Date objects from unparseable relative dates.
-        pubDate: item.pubDate && !Number.isNaN(new Date(item.pubDate).getTime()) ? parseDate(item.pubDate) : undefined,
-        guid,
-        author: item.creator || item.author,
-    };
+    return createFeedItem(summary || description || `「${item.title || '動画'}」の要約を取得できませんでした。`);
 }
 
 function extractVideoId(link?: string) {
@@ -504,17 +608,16 @@ function extractVideoId(link?: string) {
     }
 }
 
-async function summarizeVideo(videoId: string, fallbackDescription: string, provider: SummaryProvider): Promise<string> {
-    let subtitles = '';
-    try {
-        subtitles = await getSubtitlesByVideoId(videoId);
-    } catch {
-        subtitles = '';
+async function summarizeVideo(videoId: string, fallbackDescription: string, provider: SummaryProvider, cachedSubtitles?: string): Promise<string> {
+    let subtitles = cachedSubtitles ?? '';
+    if (cachedSubtitles === undefined) {
+        try {
+            subtitles = await getSubtitlesByVideoId(videoId);
+        } catch {
+            subtitles = '';
+        }
     }
-    const transcript = subtitles
-        .replaceAll(/\d+\n\d{2}:\d{2}:\d{2},\d{3} --> .*\n/g, '')
-        .trim()
-        .slice(0, maxTranscriptLength);
+    const transcript = extractTranscript(subtitles);
     const source = (transcript || fallbackDescription || '').trim();
 
     if (!source || isEffectivelyEmpty(source)) {
@@ -560,7 +663,10 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, prov
     };
     const systemPromptLength = systemPrompt.length;
     const userPromptLength = userPrompt.length;
-    logger.info(`[youtube-official] LLM request provider=${provider.kind} model=${model} promptLength=${systemPromptLength + userPromptLength} chars (system=${systemPromptLength}, user=${userPromptLength})`);
+    const llmRequestStartedAt = Date.now();
+    logger.info(
+        `[youtube-official] LLM request started video=${videoId} provider=${provider.kind} model=${model} inputSource=${transcript ? 'subtitles' : 'description'} inputChars=${source.length} promptLength=${systemPromptLength + userPromptLength} chars (system=${systemPromptLength}, user=${userPromptLength})`
+    );
     let summary: string | undefined;
     if (provider.kind === 'opencode' && isResponsesModel(model)) {
         const response = await got({
@@ -611,6 +717,7 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, prov
         // refusal is never cached as a summary for 30 days.
         throw new Error('LLM refused to summarize: transcript was effectively empty.');
     }
+    logger.info(`[youtube-official] LLM request completed video=${videoId} provider=${provider.kind} model=${model} outputChars=${summary.length} elapsedMs=${Date.now() - llmRequestStartedAt}`);
     return summary;
 }
 
