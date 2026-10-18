@@ -566,7 +566,7 @@ async function createItem(item: VideoItem, provider: SummaryProvider) {
         }
 
         if (state.status !== 'available') {
-            logger.warn(`[youtube-official] subtitle retrieval failed video=${trackingId} attempt=${subtitleAttempt} elapsedMs=${Date.now() - subtitleAttemptStartedAt} error=${subtitleError}`);
+            logger.warn(`[youtube-official] subtitle retrieval failed video=${trackingId} attempt=${subtitleAttempt} elapsedMs=${Date.now() - subtitleAttemptStartedAt} error=${subtitleError.replaceAll(/\s*\n\s*/g, ' | ')}`);
             if (isFinalRetry) {
                 state.status = 'unavailable';
                 await cache.set(cacheKey, state, subtitleStateTtlSeconds);
@@ -613,7 +613,8 @@ async function summarizeVideo(videoId: string, fallbackDescription: string, prov
     if (cachedSubtitles === undefined) {
         try {
             subtitles = await getSubtitlesByVideoId(videoId);
-        } catch {
+        } catch (error) {
+            logger.warn(`[youtube-official] subtitle refetch failed video=${videoId} error=${error instanceof Error ? error.message : String(error)}`);
             subtitles = '';
         }
     }

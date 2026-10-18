@@ -35,9 +35,12 @@ ${seg.text}
         .join('\n');
 }
 
+// YouTube may return the caption baseUrl as a relative path, which Node fetch rejects.
+const youtubeFetch: typeof fetch = (input, init) => fetch(typeof input === 'string' && input.startsWith('/') ? new URL(input, 'https://www.youtube.com') : input, init);
+
 export const getSubtitlesByVideoId = (videoId: string) =>
     cache.tryGet(`youtube:getSubtitlesByVideoId:${videoId}`, async () => {
-        const subtitles = await getSubtitles({ videoID: videoId });
+        const subtitles = await getSubtitles({ videoID: videoId, fetch: youtubeFetch });
         const srt = convertToSrt(subtitles);
         if (!srt.trim()) {
             // Throw instead of caching an empty result so a later retry can
