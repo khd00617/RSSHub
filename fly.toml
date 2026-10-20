@@ -1,5 +1,5 @@
 app = "rsshub-khd00617"
-primary_region = "nrt"
+primary_region = "ewr"
 
 [build]
 dockerfile = "Dockerfile"
